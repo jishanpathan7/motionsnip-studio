@@ -1,0 +1,151 @@
+{
+  "id": "motionsnip-demo",
+  "title": "MotionSnip demo",
+  "version": 1,
+  "src": "video.mp4",
+  "w": 1280,
+  "h": 720,
+  "fps": 30,
+  "duration": 12.0,
+  "reference": "Synthetic colour cards made with ffmpeg, so the player has something to review.",
+  "brand": {
+    "colors": [
+      { "id": "bay", "name": "Bay", "v": "#15121D" },
+      { "id": "bench", "name": "Bench", "v": "#211C2B" },
+      { "id": "paper", "name": "Paper", "v": "#F6F4EF" },
+      { "id": "cue", "name": "Cue", "v": "#FF4FA8" },
+      { "id": "tape", "name": "Tape", "v": "#E8FF47" },
+      { "id": "grain", "name": "Grain", "v": "#A49DB3" }
+    ],
+    "fonts": [
+      { "id": "head", "name": "Headlines", "v": "Bricolage Grotesque" },
+      { "id": "mono", "name": "Numbers", "v": "DM Mono" }
+    ],
+    "logo": null
+  },
+  "audio": {
+    "music": "music.mp3",
+    "videoAudio": "effects",
+    "bpm": 120,
+    "drop": 4.0,
+    "musicVol": 0.8,
+    "sfxVol": 1,
+    "musicOffset": 0,
+    "musicFade": 2,
+    "note": "Music is a soft synth chord. The video carries only the blips."
+  },
+  "assets": [
+    { "id": "music.mp3", "name": "music.mp3", "type": "audio", "from": "Claude" }
+  ],
+  "scenes": [
+    {
+      "id": "S1",
+      "name": "Hook",
+      "t": [0, 4],
+      "els": [
+        {
+          "id": "headline",
+          "label": "Headline",
+          "t": [0.3, 4],
+          "box": [20, 38, 60, 24],
+          "src": "src/Hook.tsx:14",
+          "props": {
+            "text": { "type": "text", "label": "Text", "v": "Review motion in one place" },
+            "color": { "type": "color", "label": "Color", "v": "brand.cue" },
+            "motion": { "type": "motion", "label": "Motion", "v": "Slides in from the left over 0.6 s" }
+          }
+        },
+        {
+          "id": "cue-dot",
+          "label": "Cue dot",
+          "t": [0, 4],
+          "box": [88, 8, 4, 7],
+          "src": "src/Hook.tsx:31",
+          "props": {
+            "color": { "type": "color", "label": "Color", "v": "brand.cue" },
+            "size": { "type": "number", "label": "Size (px)", "v": 51 }
+          }
+        },
+        {
+          "id": "blip-sfx",
+          "label": "Blip sound",
+          "t": [0.3, 0.6],
+          "box": null,
+          "src": "src/sfx.ts:3",
+          "props": {
+            "sound": { "type": "choice", "label": "Sound", "v": "blip", "options": ["blip", "click", "whoosh"] }
+          }
+        }
+      ]
+    },
+    {
+      "id": "S2",
+      "name": "Two cards",
+      "t": [4, 8],
+      "els": [
+        {
+          "id": "card-left",
+          "label": "Left card",
+          "t": [4, 8],
+          "box": [10, 30, 35, 40],
+          "src": "src/Cards.tsx:20",
+          "props": {
+            "title": { "type": "text", "label": "Title", "v": "Watch" },
+            "body": { "type": "longtext", "label": "Body", "v": "Play, scrub and step frame by frame." },
+            "color": { "type": "color", "label": "Fill", "v": "brand.tape" }
+          }
+        },
+        {
+          "id": "card-right",
+          "label": "Right card",
+          "t": [5, 8],
+          "box": [55, 30, 35, 40],
+          "src": "src/Cards.tsx:41",
+          "props": {
+            "title": { "type": "text", "label": "Title", "v": "Fix" },
+            "points": {
+              "type": "list",
+              "label": "Points",
+              "cols": [{ "k": "text", "type": "text" }, { "k": "icon", "type": "choice", "options": ["dot", "check"] }],
+              "v": [
+                { "text": "Edit words in place", "icon": "check" },
+                { "text": "Circle problems", "icon": "dot" }
+              ]
+            },
+            "color": { "type": "color", "label": "Fill", "v": "brand.grain" },
+            "motion": { "type": "motion", "label": "Motion", "v": "Rises 72 px and settles in 0.5 s, one beat after the left card" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "S3",
+      "name": "Outro",
+      "t": [8, 12],
+      "els": [
+        {
+          "id": "logo-block",
+          "label": "Logo",
+          "t": [8.5, 12],
+          "box": [30, 40, 40, 20],
+          "src": "src/Outro.tsx:9",
+          "props": {
+            "text": { "type": "text", "label": "Wordmark", "v": "MotionSnip Studio" },
+            "color": { "type": "color", "label": "Color", "v": "brand.bay" }
+          }
+        },
+        {
+          "id": "logo-dot",
+          "label": "Logo dot",
+          "t": [8.5, 12],
+          "box": [65.3, 41.7, 3.1, 5.6],
+          "src": "src/Outro.tsx:22",
+          "props": {
+            "color": { "type": "color", "label": "Color", "v": "brand.cue" }
+          }
+        }
+      ]
+    }
+  ],
+  "notes": []
+}
