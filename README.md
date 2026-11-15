@@ -18,9 +18,11 @@
 2. Claude builds it in code (for example with Remotion), renders it, and describes it in `reel.json`.
 3. Claude opens the player. You watch it on your own machine.
 4. You fix words in place, swap the music, set levels, move things, and circle problems on the frame.
-5. You click **Send to Claude**. The player writes your changes to a file and copies one line to your clipboard.
-6. You paste that line to Claude. Claude applies the changes, re-renders and bumps the version.
-7. The player reloads by itself and helps you check each change.
+5. You mark each scene **Approved** or **Needs changes**. Claude leaves approved scenes alone.
+6. You click **Send to Claude**. The player writes your changes to a file and copies one line to your clipboard.
+7. You paste that line to Claude. Claude applies the changes, re-renders and bumps the version.
+8. The player reloads by itself and helps you check each change. Repeat until every scene is approved.
+9. You click **Export** to get the final mp4, with the music you picked mixed in.
 
 Everything runs locally. The player is a small Node server bound to `127.0.0.1` and a web page. No accounts, no cloud, no build step, no dependencies.
 
@@ -29,10 +31,31 @@ Everything runs locally. The player is a small Node server bound to `127.0.0.1` 
 You need [Claude Code](https://claude.com/claude-code) and Node 18 or newer. Export also needs [ffmpeg](https://ffmpeg.org).
 
 ```bash
-gh repo clone jishanpathan7/motionsnip-studio ~/.claude/skills/motionsnip-studio
+git clone https://github.com/jishanpathan7/motionsnip-studio.git ~/.claude/skills/motionsnip-studio
 ```
 
-That's it. Claude Code finds the skill the next time it starts.
+Or, with the GitHub CLI: `gh repo clone jishanpathan7/motionsnip-studio ~/.claude/skills/motionsnip-studio`.
+
+That's it. Restart Claude Code and it finds the skill.
+
+## Try it in a minute
+
+Open the player on the demo project that ships with it:
+
+```bash
+node ~/.claude/skills/motionsnip-studio/player/server.mjs ~/.claude/skills/motionsnip-studio/examples/demo
+```
+
+Your browser opens the player. Press Space to play, pause on the opening headline and click it to change its words, right-click the frame to pin a note, then open the **Changes** tab to see everything Send to Claude will pass on.
+
+## Update or remove
+
+```bash
+git -C ~/.claude/skills/motionsnip-studio pull    # update
+rm -rf ~/.claude/skills/motionsnip-studio         # remove
+```
+
+Your projects keep their own `reel.json`, `.motionsnip/` history and `exports/`, so removing the skill doesn't touch them.
 
 ## Use
 
@@ -51,12 +74,6 @@ node ~/.claude/skills/motionsnip-studio/player/server.mjs path/to/project
 ```
 
 Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ffmpeg /path/to/ffmpeg`.
-
-Try it on the demo project:
-
-```bash
-node ~/.claude/skills/motionsnip-studio/player/server.mjs ~/.claude/skills/motionsnip-studio/examples/demo
-```
 
 ## Player controls
 
@@ -145,6 +162,20 @@ node player/server.mjs --selftest
 ```
 
 It checks byte ranges, upload name cleaning, file type sniffing, the host and origin checks, the ffmpeg mix arguments, and runs a real upload against a temporary project. It prints `selftest ok`.
+
+## Troubleshooting
+
+**Claude doesn't open the player.**
+Restart Claude Code after installing, so it loads the skill. Check that `~/.claude/skills/motionsnip-studio/SKILL.md` exists. You can also ask for it by name: "Use MotionSnip Studio to review this video."
+
+**The video doesn't load.**
+`src` in `reel.json` must point at the rendered file, relative to the project folder. Ask Claude to re-render, or fix the path.
+
+**The player didn't reload after a new render.**
+It reloads when `version` in `reel.json` goes up. Ask Claude to bump it, or reload the page.
+
+**Port 4321 is busy.**
+The server moves to the next free port and prints the address. Use `--port` to pick one.
 
 ## FAQ
 
