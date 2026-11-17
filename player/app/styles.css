@@ -2774,3 +2774,20 @@ kbd {
   margin: 0;
   line-height: 1.5;
 }
+
+/* frame exports: format, size, frame rate */
+.export-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+.export-form .field {
+  display: grid;
+  gap: 4px;
+}
+@media (max-width: 520px) {
+  .export-form {
+    grid-template-columns: 1fr;
+  }
+}

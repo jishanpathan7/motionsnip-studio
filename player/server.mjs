@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
 import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
 import { toReel as sceneToReel } from './app/scene/compile.mjs';
+import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, countPngs } from './lib/frames.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
 const ROOT = path.dirname(HERE); // the repo / skill folder
@@ -828,7 +829,14 @@ function sceneReel(ctx) {
     throw httpError(500, `scene.json is not valid JSON: ${err.message}`);
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(500, 'scene.json must be a JSON object');
-  const src = typeof raw.src === 'string' && raw.src && isFile(path.join(ctx.dir, raw.src)) ? raw.src : '';
+  let src = typeof raw.src === 'string' && raw.src && isFile(path.join(ctx.dir, raw.src)) ? raw.src : '';
+  if (!src) {
+    // the last export of this version, so takes, compare and cutdowns have a video
+    try {
+      const r = JSON.parse(fs.readFileSync(renderFile(ctx), 'utf8'));
+      if (r && r.version === (Number(raw.version) || 1) && typeof r.src === 'string' && isFile(path.join(ctx.dir, r.src))) src = r.src;
+    } catch {}
+  }
   const reel = sceneToReel(raw, { src });
   reel.path = ctx.dir;
   reel.file = file;
@@ -1004,6 +1012,14 @@ async function api(ctx, req, res, route, url) {
       return apiCutdown(ctx, req, res);
     case 'POST cutdown-remove':
       return apiCutdownRemove(ctx, req, res);
+    case 'GET formats':
+      return apiFormats(ctx, res);
+    case 'POST frames-start':
+      return apiFramesStart(ctx, req, res);
+    case 'POST frames-push':
+      return apiFramesPush(ctx, req, res, url);
+    case 'POST frames-end':
+      return apiFramesEnd(ctx, req, res, url);
     case 'GET ffmpeg': {
       const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
       // edits: this ffmpeg can export a plain video's trim, cuts, colour and layers
@@ -1213,6 +1229,145 @@ async function apiTakes(ctx, res) {
     url: `/p/.motionsnip/takes/${t.file}`,
   }));
   return sendJson(res, 200, takes);
+}
+
+// --- Frame exports -------------------------------------------------------------
+// The player draws each frame (a scene, graphics, captions) and streams PNGs here; ffmpeg encodes them.
+
+const FRAMES_LIMIT = 64 * 1024 * 1024; // one push: a batch of PNG frames
+const MAX_FRAMES = 60 * 60 * 20; // 20 minutes at 60 fps
+
+async function formatsFor(ctx, ff) {
+  if (!ff) return {};
+  if (ctx.formats?.path === ff.path) return ctx.formats.list;
+  const r = await run(ff.path, ['-hide_banner', '-encoders'], { env: ffmpegEnv(ff) });
+  const list = availableFormats(encoderSet(r.stdout));
+  ctx.formats = { path: ff.path, list };
+  return list;
+}
+
+async function apiFormats(ctx, res) {
+  const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+  const have = await formatsFor(ctx, ff);
+  const formats = Object.entries(FORMATS).map(([id, f]) => ({ id, label: f.label, ext: f.ext, ok: !!have[id], encoder: have[id] || null }));
+  return sendJson(res, 200, { ffmpeg: !!ff, formats });
+}
+
+/** Where a scene's last export is remembered (scene.json stays Claude's file). */
+const renderFile = (ctx) => path.join(ctx.dir, '.motionsnip', 'render.json');
+
+async function apiFramesStart(ctx, req, res) {
+  // a frame export whose page went away (reload, closed tab) stops blocking after 20 s without frames
+  const stale = ctx.frames && Date.now() - ctx.frames.last > 20000;
+  if (stale) {
+    ctx.frames.failed = 'Abandoned';
+    ctx.frames.child.kill('SIGKILL');
+    fs.rmSync(ctx.frames.out, { force: true });
+    ctx.frames = null;
+    setJob(ctx, { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null });
+  }
+  if (ctx.job.state === 'running') throw httpError(409, 'An export is already running');
+  const body = (await readJson(req)) || {};
+  const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+  if (!ff) throw httpError(400, 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
+  const format = FORMATS[body.format] ? body.format : 'mp4';
+  const encoder = (await formatsFor(ctx, ff))[format];
+  if (!encoder) throw httpError(400, `This ffmpeg can't make ${FORMATS[format].label}.`);
+  const even = (v, d) => Math.max(16, Math.min(4096, Math.round(num(v, d) / 2) * 2));
+  const w = even(body.w, 1920);
+  const h = even(body.h, 1080);
+  const fps = clamp(Math.round(num(body.fps, 30)), 1, 60);
+  const frames = Math.round(num(body.frames, 0));
+  if (!(frames > 0) || frames > MAX_FRAMES) throw httpError(400, 'Bad frame count');
+  const audio = [];
+  for (const c of (Array.isArray(body.audio) ? body.audio : []).slice(0, 32)) {
+    const file = typeof c?.src === 'string' ? resolveInside(ctx.dir, c.src) : null;
+    if (!file || !isFile(file)) throw httpError(400, `Audio not found in the project: ${c?.src}`);
+    audio.push({ file, at: num(c.at, 0), in: num(c.in, 0), out: num(c.out, null), gain: num(c.gain, 1), fadeIn: num(c.fadeIn, 0), fadeOut: num(c.fadeOut, 0) });
+  }
+  const reel = await loadReel(ctx);
+  const exportsDir = path.join(ctx.dir, 'exports');
+  fs.mkdirSync(exportsDir, { recursive: true });
+  const tag = typeof body.tag === 'string' && /^[\w-]{1,24}$/.test(body.tag) ? `-${body.tag}` : '';
+  const out = freePath(exportsDir, `${slug(reel.id)}${tag}-${stamp()}.${FORMATS[format].ext}`);
+  const rel = path.relative(ctx.dir, out).split(path.sep).join('/');
+  const args = buildFramesArgs({ fps, w, h, frames, out, format, encoder, audio });
+  const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['pipe', 'pipe', 'pipe'] });
+  const id = crypto.randomBytes(6).toString('hex');
+  const job = { id, child, total: frames, got: 0, last: Date.now(), out, rel, format, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif' };
+  let errText = '';
+  child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
+  child.stdin.on('error', () => {}); // EPIPE when ffmpeg stops early; reported from 'close'
+  job.done = new Promise((resolve) => {
+    child.on('error', (err) => {
+      job.failed = err.message;
+      resolve();
+    });
+    child.on('close', (code) => {
+      if (code !== 0 && !job.failed) job.failed = lastLine(errText) || `ffmpeg exited with code ${code}`;
+      resolve();
+    });
+  });
+  ctx.frames = job;
+  ctx.child = child;
+  ctx.job = { state: 'running', pct: 0, line: `Drawing frames (0/${frames})…`, out, rel, mode: 'frames' };
+  return sendJson(res, 200, { job: id, format, encoder, w, h, fps, frames, rel });
+}
+
+function framesJob(ctx, url) {
+  const j = ctx.frames;
+  if (!j || j.id !== url.searchParams.get('job')) throw httpError(404, 'No such export');
+  return j;
+}
+
+async function apiFramesPush(ctx, req, res, url) {
+  const j = framesJob(ctx, url);
+  const buf = await readBody(req, FRAMES_LIMIT);
+  if (j.failed) throw httpError(500, j.failed);
+  if (!buf.length) return sendJson(res, 200, { got: j.got });
+  if (buf.readUInt32BE(0) !== 0x89504e47) throw httpError(400, 'Frames must be PNG');
+  j.last = Date.now();
+  const ok = j.child.stdin.write(buf);
+  if (!ok) await new Promise((r) => j.child.stdin.once('drain', r));
+  j.got += countPngs(buf);
+  setJob(ctx, { pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
+  if (j.failed) throw httpError(500, j.failed);
+  return sendJson(res, 200, { got: j.got });
+}
+
+async function apiFramesEnd(ctx, req, res, url) {
+  const j = framesJob(ctx, url);
+  await readBody(req, JSON_LIMIT);
+  if (url.searchParams.get('cancel')) {
+    j.failed = 'Cancelled';
+    j.child.kill('SIGKILL');
+    await j.done;
+    fs.rmSync(j.out, { force: true });
+    ctx.frames = null;
+    ctx.child = null;
+    setJob(ctx, { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null });
+    return sendJson(res, 200, ctx.job);
+  }
+  setJob(ctx, { line: 'Encoding…', pct: 98 });
+  j.child.stdin.end();
+  await j.done;
+  ctx.frames = null;
+  ctx.child = null;
+  if (j.failed) {
+    fs.rmSync(j.out, { force: true });
+    setJob(ctx, { state: 'error', line: j.failed, out: null, rel: null });
+  } else {
+    if (j.setSrc) {
+      try {
+        fs.mkdirSync(path.dirname(renderFile(ctx)), { recursive: true });
+        fs.writeFileSync(renderFile(ctx), JSON.stringify({ version: j.version, src: j.rel }));
+      } catch {
+        /* the export still worked */
+      }
+    }
+    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${j.rel}` });
+  }
+  return sendJson(res, 200, ctx.job);
 }
 
 // --- Export ------------------------------------------------------------------
@@ -1701,6 +1856,30 @@ async function selftest() {
     assert.equal(cleanName('Logo Final.PNG', [...AUDIO_EXTS, ...IMAGE_EXTS]), 'Logo-Final.png');
     assert.equal(cleanName('logo.png'), null, 'images only where asked for');
 
+    // Frame exports: encoder choice, ffmpeg args, PNG counting
+    {
+      const have = encoderSet(' V....D libx264              H.264\n V....D gif                  GIF\n A....D aac                  AAC\n');
+      assert.deepEqual(availableFormats(have), { mp4: 'libx264', gif: 'gif' });
+      assert.equal(pickEncoder('webm', have), null);
+      const a = buildFramesArgs({ fps: 30, w: 1280, h: 720, frames: 90, out: 'o.mp4', format: 'mp4', encoder: 'libx264', audio: [{ file: 'm.mp3', at: 0.5, in: 2, gain: 0.8, fadeOut: 1 }] });
+      const fc = a[a.indexOf('-filter_complex') + 1];
+      assert.match(fc, /\[0:v\]format=rgba,scale=1280:720,setsar=1\[v\]/);
+      assert.match(fc, /\[1:a\]atrim=start=2:duration=2\.5,.*volume=0\.8,afade=t=out:st=1\.5:d=1,adelay=500:all=1\[a0\]/);
+      assert.match(fc, /amix=inputs=1:normalize=0.*atrim=duration=3\[aout\]/);
+      assert.deepEqual(a.slice(a.indexOf('image2pipe') - 1, a.indexOf('image2pipe') + 7), ['-f', 'image2pipe', '-framerate', '30', '-c:v', 'png', '-i', 'pipe:0']);
+      assert.ok(a.includes('aac') && a.at(-1) === 'o.mp4' && a[a.indexOf('-t') + 1] === '3');
+      const silent = buildFramesArgs({ fps: 24, w: 64, h: 36, frames: 24, out: 'o.webm', format: 'webm', encoder: 'libvpx-vp9' });
+      assert.ok(silent.includes('-an') && silent.filter((x) => x === '-map').length === 1 && silent.filter((x) => x === '-i').length === 1);
+      const gif = buildFramesArgs({ fps: 30, w: 1920, h: 1080, frames: 60, out: 'o.gif', format: 'gif', encoder: 'gif', audio: [{ file: 'm.mp3', at: 0 }] });
+      assert.match(gif.join(' '), /fps=15,scale=960:-2.*palettegen.*paletteuse/);
+      assert.equal(gif.filter((x) => x === '-i').length, 1, 'a GIF has no sound');
+      assert.throws(() => buildFramesArgs({ fps: 0, w: 1, h: 1, frames: 1, out: 'x', format: 'mp4', encoder: 'libx264' }));
+      assert.equal(audioMix([{ file: 'm.mp3', at: 9 }], 1, 3), null, 'a clip after the end is left out');
+      const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.from('IEND'), Buffer.from([0xae, 0x42, 0x60, 0x82])]);
+      assert.equal(countPngs(Buffer.concat([png, png, png])), 3);
+      assert.equal(countPngs(png.subarray(0, 8)), 0);
+    }
+
     // Plain video edits: what stays, the colour look, the ffmpeg graph
     assert.deepEqual(keepRanges(10, null, []), [[0, 10]]);
     assert.deepEqual(keepRanges(10, [1, 9], [[3, 4]]), [[1, 3], [4, 9]]);
@@ -2153,6 +2332,60 @@ async function selftest() {
       }
     } else {
       console.log('(no ffmpeg that can edit: skipped the real edit export)');
+    }
+
+    // Frame export over HTTP: synthetic PNGs into ffmpeg, checked by ffprobe; a scene gets the result as its video
+    if (realFf) {
+      const fd = mkTmp();
+      fs.writeFileSync(path.join(fd, 'scene.json'), JSON.stringify({ title: 'Frames', version: 1, size: [64, 36], fps: 10, shots: [{ id: 'a', dur: 1 }] }));
+      const env = ffmpegEnv(realFf);
+      const mk = await run(realFf.path, ['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'testsrc=size=64x36:rate=10:duration=1', path.join(fd, 'f%02d.png')], { env });
+      assert.equal(mk.code, 0, 'make test frames');
+      const pngs = fs.readdirSync(fd).filter((f) => f.endsWith('.png')).sort().map((f) => fs.readFileSync(path.join(fd, f)));
+      assert.equal(pngs.length, 10);
+      const fs2 = await startServer({ dir: fd, port: 0, open: false, quiet: true, ffmpeg: realFf.path });
+      try {
+        const post = { origin: `http://localhost:${fs2.port}` };
+        let r = await request(fs2.port, 'GET', '/api/formats');
+        assert.equal(r.json.ffmpeg, true);
+        assert.ok(r.json.formats.find((f) => f.id === 'mp4').ok);
+        const begin = (body) => request(fs2.port, 'POST', '/api/frames-start', { body: JSON.stringify(body), headers: post });
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 0 });
+        assert.equal(r.status, 400, 'a frame count is required');
+        r = await request(fs2.port, 'POST', '/api/frames-start', { body: JSON.stringify({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 10 }) });
+        assert.equal(r.status, 403, 'frames need the player origin');
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 10, setSrc: true });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        const job = r.json.job;
+        assert.ok(job);
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 10 });
+        assert.equal(r.status, 409, 'one export at a time');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${job}`, { body: Buffer.from('nope'), headers: post });
+        assert.equal(r.status, 400, 'frames must be PNG');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${job}`, { body: Buffer.concat(pngs.slice(0, 6)), headers: post });
+        assert.equal(r.json.got, 6);
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${job}`, { body: Buffer.concat(pngs.slice(6)), headers: post });
+        assert.equal(r.json.got, 10);
+        r = await request(fs2.port, 'POST', `/api/frames-end?job=${job}`, { body: '{}', headers: post });
+        assert.equal(r.json.state, 'done', r.json.line);
+        const info = await probe(realFf, path.join(fd, r.json.rel));
+        assert.equal(info.w, 64);
+        assert.ok(Math.abs(info.duration - 1) < 0.15, `frames length ${info.duration}`);
+        assert.ok(!info.hasAudio);
+        r = await request(fs2.port, 'GET', '/api/reel');
+        assert.match(r.json.src, /^\/p\/exports\/Frames-.*\.mp4$|exports\/Frames-.*\.mp4/, 'the scene plays its export');
+        // cancel removes the half-made file
+        r = await begin({ format: 'gif', fps: 10, w: 64, h: 36, frames: 10 });
+        const gj = r.json.job;
+        await request(fs2.port, 'POST', `/api/frames-push?job=${gj}`, { body: Buffer.concat(pngs.slice(0, 3)), headers: post });
+        r = await request(fs2.port, 'POST', `/api/frames-end?job=${gj}&cancel=1`, { body: '{}', headers: post });
+        assert.equal(r.json.state, 'idle');
+        assert.equal(fs.readdirSync(path.join(fd, 'exports')).filter((f) => f.endsWith('.gif')).length, 0);
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${gj}`, { body: pngs[0], headers: post });
+        assert.ok(r.status >= 400, 'a finished job takes no more frames');
+      } finally {
+        await fs2.close();
+      }
     }
 
     // Port fallback: a busy port moves to the next one.
