@@ -7,6 +7,8 @@
 
 **Review the videos Claude builds in code, fix them in place, and send one prompt back.**
 
+[motionsnip.com](https://motionsnip.com) · [Live demo](https://motionsnip.com/demo/)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
   <img alt="The MotionSnip Studio player: a video frame with a circled note, the timeline below and the Changes panel on the right" src="docs/screenshot-light.png">
