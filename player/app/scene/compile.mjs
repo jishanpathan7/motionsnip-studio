@@ -128,6 +128,17 @@ function colorProp(label, v, path) {
 
 const beatPath = (shot, b) => `shots[${shot.index}].beats[${b._j}]`;
 
+/**
+ * An element's box over time, for frames that follow it: { moves: [[t, x, y, w, h], …] }, or {} when it stays put.
+ * Points in the middle of a still stretch are left out; the player interpolates between the rest.
+ */
+export function movesOf(track) {
+  const same = (p, q) => p.every((v, i) => i === 0 || Math.abs(v - q[i]) < 0.15);
+  if (track.length < 2 || track.every((p) => same(p, track[0]))) return {};
+  const out = track.filter((p, i) => i === 0 || i === track.length - 1 || !(same(p, track[i - 1]) && same(p, track[i + 1])));
+  return { moves: out };
+}
+
 function describeBeats(spec, shot, id) {
   const bits = shot.beats
     .filter((b) => b.who === id || b.what === id)
@@ -150,14 +161,19 @@ export function toReel(raw, { src = '' } = {}) {
   const scenes = spec.shots.map((shot) => {
     const els = [];
     const ids = [...Object.keys(spec.cast), ...Object.keys(spec.props)];
+    // the shot every 0.1 s, once for all its elements
+    const samples = [];
+    for (let u = 0; u <= shot.dur + 1e-6; u += 0.1) samples.push({ u, s: stateAt(spec, shot.t0 + Math.min(u, shot.dur - 1e-3), { noTrans: true }) });
     for (const id of ids) {
       let a = null;
       let b = null;
-      for (let u = 0; u <= shot.dur + 1e-6; u += 0.1) {
-        const s = stateAt(spec, shot.t0 + Math.min(u, shot.dur - 1e-3), { noTrans: true });
-        if (boxOf(spec, s.ents, id)) {
+      const track = [];
+      for (const { u, s } of samples) {
+        const wb = boxOf(spec, s.ents, id);
+        if (wb) {
           if (a === null) a = u;
           b = u;
+          track.push([r3(shot.t0 + u), ...pct(spec, screenBox(spec, s, wb))]);
         }
       }
       if (a === null) continue;
@@ -185,6 +201,7 @@ export function toReel(raw, { src = '' } = {}) {
         label: c ? c.name : p.name,
         t: [r3(shot.t0 + a), r3(shot.t0 + Math.min(b + 0.1, shot.dur))],
         box: pct(spec, screenBox(spec, s, wb)),
+        ...movesOf(track),
         src: `scene.json › ${c ? 'cast' : 'props'}.${id}`,
         entity: id,
         props,

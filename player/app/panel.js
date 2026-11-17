@@ -36,6 +36,7 @@ import {
   setRequest,
   requestText,
 } from './state.js';
+import { boxAt } from './reel.mjs';
 import { seek, currentTime, player, duration } from './video.js';
 import { pinNote, openNote, editText, openSpot, render as renderOverlay } from './overlay.js';
 import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount, sceneApplicable, applySceneNow } from './feedback.js';
@@ -263,7 +264,7 @@ function renderEdit() {
 }
 
 function noteOnEl(el) {
-  const b = el.box;
+  const b = boxAt(el, currentTime());
   pinNote(b[0] + b[2] / 2, b[1] + b[3] / 2);
 }
 

@@ -2446,6 +2446,38 @@ async function selftest() {
         await sb.close();
       }
     }
+    // Frames that follow motion: elements carry their box over time
+    {
+      const sc = await import('./app/scene/compile.mjs');
+      const tm = await import('./app/comp/timeline.mjs');
+      const { boxAt, normalizeReel } = await import('./app/reel.mjs');
+      const scene = { title: 'M', version: 1, cast: { ana: { kind: 'person' } }, props: { box: { kit: 'box' } }, shots: [{ id: 'a', dur: 3, place: { ana: [400, 885], box: [1400, 885] }, beats: [{ at: 0.5, who: 'ana', do: 'walk', to: [1000, 885], dur: 1.5 }] }] };
+      const sr = sc.toReel(scene);
+      const ana = sr.scenes[0].els.find((e) => e.entity === 'ana');
+      const still = sr.scenes[0].els.find((e) => e.entity === 'box');
+      assert.ok(ana.moves && ana.moves.length >= 3, 'a walking person has moves');
+      assert.equal(still.moves, undefined, 'a prop that stays put has none');
+      const x0 = boxAt(ana, 0)[0];
+      const x2 = boxAt(ana, 2.5)[0];
+      assert.ok(x2 - x0 > 20, `the box walks with her (${x0} → ${x2})`);
+      assert.deepEqual(boxAt(still, 1), still.box);
+      assert.deepEqual(boxAt({ box: [1, 2, 3, 4], moves: [[0, 0, 0, 10, 10], [2, 20, 0, 10, 10]] }, 1), [10, 0, 10, 10], 'halfway between two points');
+      assert.equal(normalizeReel({ scenes: [{ els: [{ id: 'e', box: [0, 0, 1, 1], moves: [[0, 1]] }] }] }).scenes[0].els[0].moves, undefined, 'bad moves are dropped');
+      const tl = {
+        tracks: [
+          { id: 'g', kind: 'graphics', clips: [{ id: 'fly', type: 'text', text: 'Hi', at: 1, dur: 2, keys: { x: [[0, 0], [2, 40]] } }, { id: 'sit', type: 'text', text: 'Yo', at: 0, dur: 2 }] },
+          { id: 's', kind: 'scene', clips: [{ id: 'sc', scene: 'scene.json', at: 4 }] },
+        ],
+      };
+      const tr = tm.toReel(tl, { scenes: { 'scene.json': scene } });
+      const all = tr.scenes.flatMap((s) => s.els);
+      const fly = all.find((e) => e.id === 'fly');
+      assert.ok(fly.moves && Math.abs(boxAt(fly, 3)[0] - boxAt(fly, 1)[0] - 40) < 0.5, 'a keyframed clip moves by its keys');
+      assert.equal(all.find((e) => e.id === 'sit').moves, undefined);
+      const inClip = all.find((e) => e.id === 'sc/ana@a');
+      assert.ok(inClip.moves && inClip.moves[0][0] >= 4 - 0.11, 'scene moves shift to the clip on the timeline');
+      assert.ok(boxAt(inClip, 6.5)[0] - boxAt(inClip, 4)[0] > 20);
+    }
     // A scene project: scene.json, no reel.json. The reel is built from the scene; the player draws it live.
     {
       const sc = await import('./app/scene/compile.mjs');
