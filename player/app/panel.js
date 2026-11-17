@@ -39,6 +39,7 @@ import { pinNote, openNote, editText, openSpot, render as renderOverlay } from '
 import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount } from './feedback.js';
 import { h, icon, fmtTime, round, clamp, projectUrl, toast, copyText, baseName } from './util.js';
 import { on as plainOn, renderPane as renderPlainEdit } from './vedit.js';
+import { goToOutput } from './outputs.js';
 
 const TABS = [
   ['edit', 'Edit'],
@@ -133,7 +134,8 @@ export function render(force = false) {
   const refocus = act && pn.body.contains(act) ? act.getAttribute('aria-label') : null;
   const tab = store.ui.tab;
   let content;
-  if (tab === 'edit') content = renderEdit();
+  if (store.reel.derived && tab !== 'changes') content = renderDerived();
+  else if (tab === 'edit') content = renderEdit();
   else if (tab === 'script') content = renderScript();
   else if (tab === 'look') content = renderLook();
   else if (tab === 'sound') content = renderSound();
@@ -788,9 +790,27 @@ export async function uploadAudio(file) {
 
 // ---------------------------------------------------------------- Changes
 
-function jumpTo(at, elId) {
+function jumpTo(at, elId, out = 'master') {
+  if (out !== store.out) {
+    goToOutput(out, Number.isFinite(at) ? at : 0); // `at` is on that output's clock
+    return;
+  }
   if (Number.isFinite(at)) seek(at, { exact: true });
   if (elId) select(elId);
+}
+
+/** A cutdown is made from the master: notes go here, everything else is changed on the master. */
+function renderDerived() {
+  const o = store.reel.output;
+  return h(
+    'div.derived-note',
+    h('h2', `The ${o.label} version`),
+    h(
+      'p.small.muted',
+      `${o.w}×${o.h} · ${fmtTime(o.duration)} · ${o.by === 'player' ? 'made here from the master' : 'made by Claude'}. Click the frame to leave a note on this version. Edits, script, look and sound are changed on the master${o.by === 'player' ? ', then re-render this version' : ''}.`,
+    ),
+    h('button.btn.btn-sm', { type: 'button', onclick: () => goToOutput('master') }, 'Go to the master'),
+  );
 }
 
 function renderChanges() {
@@ -841,7 +861,12 @@ function renderChanges() {
               h(
                 'div.cbody',
                 h('div.cshort', d.short),
-                h('div.cdetail.small.muted', d.detail, c.sent ? h('span.sent-tag', ` · sent with v${c.sent}`) : null),
+                h(
+                  'div.cdetail.small.muted',
+                  d.detail,
+                  c.out && c.out !== 'master' ? h('span.out-tag', ` · on ${store.master.outputs.find((o) => o.id === c.out)?.label || c.out}`) : null,
+                  c.sent ? h('span.sent-tag', ` · sent with v${c.sent}`) : null,
+                ),
               ),
               h(
                 'div.cact',
@@ -853,7 +878,7 @@ function renderChanges() {
                         title: 'Jump there',
                         'aria-label': 'Jump there',
                         onclick: () => {
-                          jumpTo(d.at, c.elId);
+                          jumpTo(d.at, c.elId, c.out || 'master'); // switching output reloads synchronously
                           if (c.kind === 'note') openNote(c.id);
                         },
                       },

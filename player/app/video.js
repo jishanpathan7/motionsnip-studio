@@ -89,7 +89,7 @@ export function initPlayback({ video, music, cmp, liveHost, frameMsg }) {
     player.videoOk = true;
     frameMsg.hidden = true;
     // a plain video's real picture size (the browser applies rotation), so the frame has its shape
-    if (store.reel?.plain && video.videoWidth && video.videoHeight) {
+    if (store.reel?.plain && !store.reel.derived && video.videoWidth && video.videoHeight) {
       store.reel.w = video.videoWidth;
       store.reel.h = video.videoHeight;
     }
@@ -179,6 +179,12 @@ export function loadReel({ keepTime = false, startAt = null } = {}) {
   player._musicSrc = undefined;
   syncMusicSrc(true);
   if (reel.live) loadLive(reel.live, reel.version);
+  else if (player.live || document.body.classList.contains('has-live')) {
+    // a cutdown is a plain video file: leave the master's live scene
+    player.live = null;
+    player.liveHost.innerHTML = '';
+    document.body.classList.remove('has-live');
+  }
   loadTakes();
 }
 
@@ -441,7 +447,7 @@ export async function loadTakes() {
   } catch {
     player.takes = [];
   }
-  const cur = store.reel.version;
+  const cur = store.master.version; // takes are versions of the master
   const older = player.takes.filter((x) => +x.version < cur).sort((a, b) => b.version - a.version);
   player.prevTake = older[0] || null;
   if (player.cmp) {
@@ -452,6 +458,10 @@ export async function loadTakes() {
 }
 
 export function setCompare(on) {
+  if (on && store.reel.derived) {
+    toast('Compare works on the master: switch to it to see the previous version.');
+    on = false;
+  }
   if (on && !player.prevTake) {
     if (on) toast('No earlier version to compare with yet.');
     on = false;

@@ -4,21 +4,11 @@
 // keeps one record, and undo removes exactly one thing. Records are saved to browser storage and to
 // `.motionsnip/state.json` (POST /api/state, debounced). On load the newer copy wins.
 
-import { Emitter, api, clamp, debounce, newId, sameValue, sameBox, baseName } from './util.js';
+import { Emitter, api, debounce, newId, sameValue, sameBox, baseName } from './util.js';
+import { normalizeReel, resolveOutput, outTime, masterTime } from './reel.mjs';
 
 export const bus = new Emitter();
 
-const DEFAULT_AUDIO = {
-  music: null,
-  videoAudio: 'effects',
-  bpm: null,
-  drop: null,
-  musicVol: 1,
-  sfxVol: 1,
-  musicOffset: 0,
-  musicFade: 0,
-  note: '',
-};
 
 export const AUDIO_FIELDS = ['music', 'musicOffset', 'musicFade', 'musicVol', 'sfxVol'];
 
@@ -40,7 +30,12 @@ function emptyData() {
 }
 
 export const store = {
+  /** the reel as seen on the current output (the master, or a cutdown/language version of it) */
   reel: null,
+  /** the master reel, with every output */
+  master: null,
+  /** the output on screen: 'master' or an output id */
+  out: 'master',
   /** id -> { el, scene } */
   els: new Map(),
   data: emptyData(),
@@ -55,140 +50,6 @@ export const store = {
     waiting: false,
   },
 };
-
-// ---------------------------------------------------------------- reel normalisation
-
-const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-const pair = (v, d) =>
-  Array.isArray(v) && v.length >= 2 && Number.isFinite(+v[0]) && Number.isFinite(+v[1]) ? [+v[0], +v[1]] : d;
-
-function normBox(b) {
-  if (!Array.isArray(b) || b.length < 4) return null;
-  const out = b.slice(0, 4).map(Number);
-  return out.every(Number.isFinite) ? out : null;
-}
-
-function normProp(key, p) {
-  if (p == null || typeof p !== 'object' || Array.isArray(p)) p = { v: p };
-  const type = typeof p.type === 'string' ? p.type : typeof p.v === 'number' ? 'number' : 'text';
-  const out = { ...p, type, label: p.label || key };
-  if (type === 'list') {
-    out.cols = Array.isArray(p.cols) && p.cols.length ? p.cols.filter((c) => c && c.k) : [{ k: 'text', type: 'text' }];
-    out.v = Array.isArray(p.v) ? p.v.map((r) => (r && typeof r === 'object' ? r : { [out.cols[0].k]: r })) : [];
-  } else if (type === 'choice') {
-    out.options = Array.isArray(p.options) ? p.options.map((o) => (o && typeof o === 'object' ? o : { v: o, label: String(o) })) : [];
-  }
-  if (out.v === undefined) out.v = type === 'number' ? 0 : '';
-  return out;
-}
-
-export function normalizeReel(raw) {
-  const r = raw && typeof raw === 'object' ? raw : {};
-  const duration = num(r.duration, 0);
-  const reel = {
-    ...r,
-    id: String(r.id || r.title || 'reel'),
-    title: String(r.title || r.id || 'Untitled'),
-    version: num(r.version, 1),
-    path: String(r.path || ''),
-    src: r.src || '',
-    w: num(r.w, 1920),
-    h: num(r.h, 1080),
-    fps: num(r.fps, 30) || 30,
-    duration,
-    reference: r.reference || '',
-    live: typeof r.live === 'string' && r.live ? r.live : null,
-    export: r.export && typeof r.export === 'object' ? r.export : null,
-  };
-  const brand = r.brand && typeof r.brand === 'object' ? r.brand : {};
-  reel.brand = {
-    colors: Array.isArray(brand.colors) ? brand.colors.filter((c) => c && c.id).map((c) => ({ name: c.id, v: '#000000', ...c })) : [],
-    fonts: Array.isArray(brand.fonts) ? brand.fonts.filter((f) => f && f.id).map((f) => ({ name: f.id, v: '', ...f })) : [],
-    logo: brand.logo || null,
-  };
-  const a = r.audio && typeof r.audio === 'object' ? r.audio : {};
-  reel.audio = {
-    ...DEFAULT_AUDIO,
-    ...a,
-    music: a.music || null,
-    videoAudio: a.videoAudio === 'mix' ? 'mix' : 'effects',
-    bpm: num(a.bpm, null),
-    drop: num(a.drop, null),
-    musicVol: clamp(num(a.musicVol, 1), 0, 1),
-    sfxVol: clamp(num(a.sfxVol, 1), 0, 1),
-    musicOffset: num(a.musicOffset, 0),
-    musicFade: Math.max(0, num(a.musicFade, 0)),
-    note: a.note ? String(a.note) : '',
-  };
-  reel.assets = Array.isArray(r.assets)
-    ? r.assets.filter((x) => x && x.id).map((x) => ({ name: baseName(x.id), type: guessType(x.id), from: '', ...x }))
-    : [];
-  if (reel.audio.music && !reel.assets.some((x) => x.id === reel.audio.music)) {
-    reel.assets.push({ id: reel.audio.music, name: baseName(reel.audio.music), type: 'audio', from: 'reel.json' });
-  }
-  const scenes = Array.isArray(r.scenes) ? r.scenes : [];
-  let lastEnd = 0;
-  reel.scenes = scenes
-    .filter((s) => s && typeof s === 'object')
-    .map((s, i) => {
-      const t = pair(s.t, [lastEnd, lastEnd]);
-      lastEnd = t[1];
-      return {
-        ...s,
-        id: String(s.id || 'S' + (i + 1)),
-        name: String(s.name || s.id || 'Scene ' + (i + 1)),
-        t,
-        els: (Array.isArray(s.els) ? s.els : [])
-          .filter((e) => e && e.id)
-          .map((e) => {
-            const props = {};
-            if (e.props && typeof e.props === 'object') for (const [k, p] of Object.entries(e.props)) props[k] = normProp(k, p);
-            return { ...e, id: String(e.id), label: String(e.label || e.id), t: pair(e.t, t), box: normBox(e.box), src: e.src || '', props };
-          }),
-      };
-    });
-  if (!reel.duration) reel.duration = reel.scenes.length ? reel.scenes[reel.scenes.length - 1].t[1] : 0;
-  reel.review = normReview(r.review);
-  return reel;
-}
-
-/**
- * Claude's self-review: problems it spotted in its own render and left for the reviewer to decide.
- * Each finding: { id, t, title, detail?, fix?, kind?, box?: [x, y, w, h] in % | x?, y? in % | elId? }.
- */
-function normReview(list) {
-  if (!Array.isArray(list)) return [];
-  const seen = new Set();
-  return list
-    .filter((f) => f && typeof f === 'object' && (f.title || f.text))
-    .map((f, i) => {
-      let id = String(f.id || 'r' + (i + 1));
-      while (seen.has(id)) id += '_';
-      seen.add(id);
-      const box = normBox(f.box);
-      const x = box ? box[0] + box[2] / 2 : num(f.x, null);
-      const y = box ? box[1] + box[3] / 2 : num(f.y, null);
-      return {
-        id,
-        t: Math.max(0, num(f.t, 0)),
-        title: String(f.title || f.text),
-        detail: f.detail ? String(f.detail) : '',
-        fix: f.fix ? String(f.fix) : '',
-        kind: f.kind ? String(f.kind) : '',
-        box,
-        x: x == null ? null : clamp(x, 0, 100),
-        y: y == null ? null : clamp(y, 0, 100),
-        elId: f.elId ? String(f.elId) : null,
-      };
-    });
-}
-
-function guessType(p) {
-  const ext = String(p).split('.').pop().toLowerCase();
-  if (['mp3', 'wav', 'm4a', 'aac', 'ogg'].includes(ext)) return 'audio';
-  if (['mp4', 'webm', 'mov'].includes(ext)) return 'video';
-  return 'image';
-}
 
 function indexEls() {
   store.els = new Map();
@@ -208,6 +69,7 @@ export function sceneAt(t) {
 }
 
 export function visibleEls(t) {
+  if (store.reel?.derived) return []; // an output takes notes; element edits belong on the master
   const out = [];
   for (const { el } of store.els.values()) if (t >= el.t[0] - 1e-6 && t < el.t[1] + 1e-6) out.push(el);
   return out;
@@ -230,13 +92,19 @@ export function boxValue(elId) {
 
 export function audioValue(field) {
   const c = findChange(`audio:${field}`);
-  return c ? c.after : store.reel?.audio[field];
+  return c ? c.after : store.master?.audio[field];
 }
 
-export function effectiveAudio() {
-  const a = { ...store.reel.audio };
+/** The master's sound with the reviewer's changes: what an export or a cutdown mixes. */
+export function masterAudio() {
+  const a = { ...store.master.audio };
   for (const f of AUDIO_FIELDS) a[f] = audioValue(f);
   return a;
+}
+
+/** The sound to play with the video on screen. A cutdown has its music mixed in already. */
+export function effectiveAudio() {
+  return store.reel?.derived ? { ...store.reel.audio } : masterAudio();
 }
 
 export function colorValue(id) {
@@ -275,7 +143,7 @@ export function mainTextKey(el) {
 
 // ---------------------------------------------------------------- Claude's self-review
 
-const reviewKey = (f) => `v${store.reel.version}:${f.id}`;
+const reviewKey = (f) => `${store.out === 'master' ? '' : store.out + '@'}v${store.reel.version}:${f.id}`;
 
 /** Findings with a place on the frame: their own box or point, or their element's box. */
 export function findingSpot(f) {
@@ -327,12 +195,25 @@ export function restoreFinding(id) {
   changed({ review: id });
 }
 
+const noteOut = (n) => n.out || 'master';
+
+/** Notes pinned on the output on screen. */
 export function notes() {
+  return store.data.changes.filter((c) => c.kind === 'note' && noteOut(c) === store.out);
+}
+
+/** Every note, on every output. */
+export function allNotes() {
   return store.data.changes.filter((c) => c.kind === 'note');
 }
 
+/** A note's number among the notes on its own output. */
 export function noteNumber(id) {
-  return notes().findIndex((n) => n.id === id) + 1;
+  const n = allNotes().find((x) => x.id === id);
+  if (!n) return 0;
+  return allNotes()
+    .filter((x) => noteOut(x) === noteOut(n))
+    .findIndex((x) => x.id === id) + 1;
 }
 
 export function elHasEdits(elId) {
@@ -355,7 +236,7 @@ export function sceneStatus(sceneId) {
 }
 
 export function approvedCount() {
-  return store.reel.scenes.filter((s) => sceneStatus(s.id) === 'approved').length;
+  return store.master.scenes.filter((s) => sceneStatus(s.id) === 'approved').length;
 }
 
 export function unsentChanges() {
@@ -443,6 +324,7 @@ export function addNote({ t, x, y, elId, text = '', review = null }) {
   const id = newId('n');
   const scene = sceneAt(t);
   const rec = { kind: 'note', key: `note:${id}`, id, t, x, y, elId: elId || null, sceneId: scene?.id || null, text };
+  if (store.out !== 'master') rec.out = store.out; // pinned on a cutdown: its time is on that output's clock
   if (review) rec.review = review; // accepted from Claude's self-review
   store.data.changes.push({ ...rec, createdAt: Date.now(), sent: null });
   changed({ key: rec.key, note: id, added: true });
@@ -476,7 +358,7 @@ export function undo(key) {
     if (audioValue('music') === c.asset.id) remove('audio:music');
   }
   // undoing an accepted finding puts it back up for review
-  if (c.kind === 'note' && c.review && store.reel) delete store.data.review[`v${store.reel.version}:${c.review}`];
+  if (c.kind === 'note' && c.review && store.reel && (c.out || 'master') === store.out) delete store.data.review[reviewKey({ id: c.review })];
   changed({ key, undone: true, elId: c.elId, note: c.kind === 'note' ? c.id : undefined });
   return true;
 }
@@ -592,8 +474,29 @@ function dropStaleChanges() {
 }
 
 export function setReel(raw) {
-  store.reel = normalizeReel(raw);
+  store.master = normalizeReel(raw);
+  if (store.out !== 'master' && !store.master.outputs.some((o) => o.id === store.out)) store.out = 'master';
+  store.reel = resolveOutput(store.master, store.out);
   indexEls();
+}
+
+/** The output on screen, or null for the master. */
+export const currentOutput = () => store.reel?.output || null;
+
+/**
+ * Show another output. Returns the time to show it at (the same moment, on that output's clock).
+ * The caller reloads the video, timeline and overlay.
+ */
+export function setOutput(id, t = store.ui.t) {
+  const from = currentOutput();
+  const next = id && id !== 'master' && store.master.outputs.some((o) => o.id === id) ? id : 'master';
+  const mt = masterTime(from, t);
+  store.out = next;
+  store.reel = resolveOutput(store.master, next);
+  indexEls();
+  store.ui.selected = null;
+  store.ui.noteOpen = null;
+  return outTime(currentOutput(), mt);
 }
 
 /**
@@ -606,7 +509,7 @@ export function adoptNewReel(raw) {
   const sent = [];
   const keep = [];
   for (const c of store.data.changes) {
-    if (c.sent && c.sent < store.reel.version) sent.push(c);
+    if (c.sent && c.sent < store.master.version) sent.push(c);
     else keep.push(c);
   }
   // rebase unsent records
@@ -624,17 +527,17 @@ export function adoptNewReel(raw) {
       return !sameBox(el.box, c.after, 0.05);
     }
     if (c.kind === 'audio') {
-      c.before = store.reel.audio[c.field] ?? null;
+      c.before = store.master.audio[c.field] ?? null;
       return !sameValue(c.before, c.after);
     }
     if (c.kind === 'brand') {
-      const col = store.reel.brand.colors.find((x) => x.id === c.colorId);
+      const col = store.master.brand.colors.find((x) => x.id === c.colorId);
       if (!col) return false;
       c.before = col.v;
       return !sameValue(col.v, c.after);
     }
     if (c.kind === 'font') {
-      const f = store.reel.brand.fonts.find((x) => x.id === c.fontId);
+      const f = store.master.brand.fonts.find((x) => x.id === c.fontId);
       if (!f) return false;
       c.before = f.v;
       return !sameValue(f.v, c.after);
@@ -642,7 +545,7 @@ export function adoptNewReel(raw) {
     return true;
   });
   // keep uploads that the new reel doesn't list yet
-  store.data.uploads = store.data.uploads.filter((u) => !store.reel.assets.some((a) => a.id === u.id));
+  store.data.uploads = store.data.uploads.filter((u) => !store.master.assets.some((a) => a.id === u.id));
   void oldReel;
   return sent;
 }

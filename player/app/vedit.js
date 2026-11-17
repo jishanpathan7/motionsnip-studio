@@ -50,7 +50,7 @@ const ve = {
 // ---------------------------------------------------------------- state
 
 /** True while a plain video is open (and no live renderer took over). */
-export const on = () => !!store.reel?.plain && !player.live;
+export const on = () => !!store.reel?.plain && !store.reel.derived && !player.live;
 
 function normEdit(v) {
   if (!v || typeof v !== 'object') return null;

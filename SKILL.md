@@ -109,6 +109,9 @@ Fix what you can. For anything left, or anything that is a matter of taste, add 
       "detail": "At 1.5 s the last word ends 2% from the edge, outside title-safe.",
       "fix": "Narrow the box to 56% or drop the size a step." }
   ],
+  "outputs": [                      // optional: other shapes and lengths you made from it (section 9)
+    { "id": "vertical", "label": "9:16", "kind": "reframe", "src": "out/vertical.mp4", "w": 1080, "h": 1920, "platform": "reels" }
+  ],
   "live": "live.js",                // optional live renderer (section 7)
   "export": { "cwd": "/abs/build/folder", "props": {}, "cmd": "npx remotion render ... \"$OUT\" --props=\"$PROPS\"" }  // optional (section 8)
 }
@@ -124,6 +127,7 @@ Rules:
 - Every prop value must equal what is actually rendered. The player ticks an edit as done when the new `reel.json` value matches what was asked.
 - `path` can be left out; the server fills in the project folder.
 - **`review` findings:** `id` (unique in this version, e.g. `v2-1`), `t` (seconds), `title` (one line), optional `detail`, `fix` and `kind` (`safe area`, `size`, `contrast`, `typo`, `overflow`, `cut`, `timing` or your own word). Place it with `elId` (an element id, ringed at its box), `box: [x, y, w, h]`, or `x`, `y` in % of the frame. Write a fresh list for every version; don't repeat anything the user dismissed.
+- **`outputs`**: see section 9.
 - Unknown fields are ignored. Missing optional fields get defaults.
 
 ## 5. Open the player
@@ -148,6 +152,8 @@ The user pastes `Apply the MotionSnip Studio feedback in <project>/.motionsnip/f
 - **Exact changes.** Lines like `[00:01.2 · S1 · Headline] Text (src/Hook.tsx:12): "Meet Acme" -> "Say hi to Acme"`. Make exactly that change in the code and in `reel.json`. Don't reword it. A colour edit to `brand.<id>` changes the palette entry, so everything linked to it changes.
 - **Size and position edits.** `[x, y, w, h] -> [x, y, w, h] (scale 1.12)` in % of the frame. Convert to pixels with the frame size (`x% * w / 100`), move or resize the element in code, and update its `box`.
 - **Sound settings.** New track (already saved in `assets/`), start offset, fade, volumes. Update `audio` in `reel.json`. If the video carries effects only, you usually don't need to re-render for these. If music is baked in (`videoAudio: "mix"`), re-render with the new settings.
+- **Comments on the {label} version.** The same kind of comment, left on a cutdown (9:16, 1:1, a bumper) instead of the master. Times and spots are on that version's own frame and clock; a bumper's section says which parts of the master it is cut from. Fix the cause in the master when you can (keep the important things where the crops see them). If you made that version yourself (it is in your `outputs`), render it again too and bump its own `version`.
+- **Cutdowns made in MotionSnip Studio.** Versions the player renders itself from the master, with their crop keys or ranges. Leave their files alone; the reviewer re-renders them after your next version.
 - **Comments on the frame.** Free comments pinned to a time and a spot (`x 23.9% y 81.8%`), often on a named element. Grab that frame and look at it before you decide what to do. Notes are requests, not exact values; use judgement and keep the rest of the scene intact.
 - **Not quite from vN-1.** Things you changed last round that the user says aren't right yet, with their reason. Fix these first.
 - **From your self-review.** A comment ending `(from your self-review, v1-2; the reviewer agrees)` is one of your own findings that the user accepted. Treat it like any other note.
@@ -162,7 +168,7 @@ Then:
 4. Update every changed value in `reel.json` and set `version` to N+1 (the file says which number). Bump the version last, after the render has finished.
 5. Tell the user in one line what changed, for example "v4 is in · 5 changes applied, the outro note needs your eye".
 
-Never edit `.motionsnip/` or `exports/`; they belong to the player.
+Never edit `.motionsnip/`, `exports/` or the player's cutdowns in `outputs/` (listed in `.motionsnip/outputs.json`); they belong to the player.
 
 ## 7. Optional: live renderer
 
@@ -202,3 +208,27 @@ The server runs `cmd` with `sh -c` in `cwd` and sets:
 Progress comes from the last `n/m` pair the command prints (Remotion prints frame counts like this).
 
 Without an export hook, Export still works: it copies the video and mixes in the music with ffmpeg.
+
+## 9. Optional: other shapes and lengths (outputs)
+
+The player makes cutdowns itself: **+ Cutdown** renders a 9:16, 1:1 (or 16:9 from a vertical master) or a 6-second bumper from the master with ffmpeg, into `outputs/<id>.mp4`. A reframe follows crop keys the reviewer drags on the master (or a first guess from your element boxes, so keep `box` accurate), or fits the whole frame on a blurred fill. Each output gets its own tab, safe-area guides for Reels, TikTok and Shorts, and its own notes. You don't need to do anything for these.
+
+When a code-built video looks better laid out again than cropped, render that version yourself and list it in `reel.json`:
+
+```jsonc
+"outputs": [
+  { "id": "vertical", "label": "9:16", "kind": "reframe", "platform": "reels",
+    "src": "out/vertical.mp4", "w": 1080, "h": 1920, "duration": 12,
+    "audio": { "music": null, "videoAudio": "mix" },   // if the music is mixed into this file
+    "version": 1,                                       // bump it when you render this output again
+    "review": [ /* findings on this version, placed on its own frame and clock */ ] },
+  { "id": "bumper", "label": "6 s", "kind": "bumper", "src": "out/bumper.mp4", "duration": 6,
+    "ranges": [[0, 3.3], [9.3, 12]] }                   // which master seconds it is cut from
+]
+```
+
+- `id` is unique and stable; `kind` is `reframe`, `bumper`, `render` or `lang`. `w`, `h` and `duration` default to the master's.
+- Scenes and elements are the master's. A bumper's scenes follow its `ranges`; any other output keeps the master's clock.
+- An output you list replaces a player cutdown with the same id. The player won't re-render yours.
+- Self-review per output: look at each output's frames too (captions under the platform UI, a logo cut off by the crop) and put findings in that output's `review`.
+

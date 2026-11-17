@@ -1,6 +1,6 @@
 // Export: a dialog that says what you'll get, starts the job, shows progress, offers Show in Finder.
 
-import { store, bus, effectiveAudio, approvedCount, assetName, findChange } from './state.js';
+import { store, bus, masterAudio as effectiveAudio, approvedCount, assetName, findChange } from './state.js';
 import { api, h, icon, projectUrl, round, toast } from './util.js';
 import { hasEdits, summary as editSummary, exportEdit } from './vedit.js';
 

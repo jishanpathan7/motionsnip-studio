@@ -41,7 +41,7 @@ fs.mkdirSync(path.join(OUT, 'demo'), { recursive: true });
 fs.writeFileSync(path.join(OUT, 'demo', 'index.html'), demo);
 
 // demo project files, served where the player expects them (/p/*)
-for (const f of ['reel.json', 'video.mp4', 'music.mp3']) copy(`examples/demo/${f}`, `p/${f}`);
+for (const f of ['reel.json', 'video.mp4', 'music.mp3', 'outputs']) copy(`examples/demo/${f}`, `p/${f}`);
 
 const count = (d) => fs.readdirSync(d, { withFileTypes: true }).reduce((n, e) => n + (e.isDirectory() ? count(path.join(d, e.name)) : 1), 0);
 console.log(`Built ${count(OUT)} files into dist/`);

@@ -13,8 +13,9 @@ import {
   sceneStatus,
   sceneAt,
   getEl,
-  notes,
+  allNotes,
   unsentChanges,
+  setReel as setReelRaw,
 } from './state.js';
 import {
   player,
@@ -40,6 +41,7 @@ import { initExport, updateButton as updateExportButton } from './export.js';
 import { initFavicon, setFavicon } from './favicon.js';
 import { initKeys, toggleSheet } from './keys.js';
 import { initVedit, hint as plainHint, addLogoFile } from './vedit.js';
+import { initOutputs, outputsSig } from './outputs.js';
 import { h, icon, api, fmtTime, toast, debounce, clamp, prefersReducedMotion } from './util.js';
 
 const ui = {};
@@ -204,7 +206,8 @@ function build() {
       : h('div.drop-card', icon('music', 28), h('b', 'Drop to use as music'), h('span.small', 'mp3, wav or m4a')),
   );
 
-  const left = h('section.left', ui.stage, transport, ui.timeline, ui.hint);
+  ui.outBar = h('div.out-bar');
+  const left = h('section.left', h('div.out-wrap', ui.outBar), ui.stage, transport, ui.timeline, ui.hint);
   const layout = h('main.layout', left, ui.panel);
   app.replaceChildren(header, layout, ui.drop, ui.music);
 
@@ -259,7 +262,7 @@ function nextToReview() {
 // ---------------------------------------------------------------- header state
 
 function updateHeader() {
-  const reel = store.reel;
+  const reel = store.master;
   if (!reel) return;
   ui.title.textContent = reel.title;
   ui.title.title = reel.path || reel.title;
@@ -308,7 +311,7 @@ function updateHeader() {
 function updateFav() {
   if (readyUntilFocus) return setFavicon('ready');
   if (store.data.pending) return setFavicon('working');
-  if (notes().some((n) => !n.sent)) return setFavicon('notes');
+  if (allNotes().some((n) => !n.sent)) return setFavicon('notes');
   setFavicon('idle');
 }
 
@@ -425,11 +428,41 @@ async function poll() {
     location.reload();
     return;
   }
-  if (Number(raw.version) !== store.reel.version) newVersion(raw);
+  applyRaw(raw);
+}
+
+/** Take a reel.json read from the server: a new version, a changed outputs list, or nothing new. */
+function applyRaw(raw) {
+  if (Number(raw.version) !== store.master.version) newVersion(raw);
+  else if (outputsSig(raw) !== outputsSig(store.master)) outputsChanged(raw);
+}
+
+/** A cutdown finished or Claude listed a new output: take the new list; reload the video if the one on screen changed. */
+function outputsChanged(raw) {
+  const before = { out: store.out, src: store.reel.src, version: store.reel.version };
+  const t = currentTime();
+  setReelRaw(raw);
+  bus.emit('outputs', {});
+  if (store.out !== before.out) showOutput(0);
+  else if (store.reel.src !== before.src || store.reel.version !== before.version) showOutput(Math.min(t, store.reel.duration));
+}
+
+/** Show the output store.out points at, at time t (on its clock). */
+function showOutput(t) {
+  if (store.ui.compare) setCompare(false);
+  loadReel({ startAt: t });
+  loadTimeline();
+  fitFrame();
+  bus.emit('reel', {});
+  bus.emit('changes', { output: true });
+  renderPanel(true);
+  renderOverlay(true);
+  updateHeader();
+  updateHint();
 }
 
 function newVersion(raw) {
-  const from = store.reel.version;
+  const from = store.master.version;
   const sent = adoptNewReel(raw);
   let applied = 0;
   let check = null;
@@ -445,7 +478,7 @@ function newVersion(raw) {
   loadTimeline();
   fitFrame();
   flashCue();
-  const v = store.reel.version;
+  const v = store.master.version;
   arrival = {
     version: v,
     text: sent.length ? `v${v} is in · ${applied} of ${check?.items.length ?? sent.length} change${sent.length === 1 ? '' : 's'} applied` : `v${v} is in`,
@@ -532,13 +565,13 @@ async function boot() {
   // a version may have landed while the page was closed
   const pend = store.data.pending;
   let landed = null;
-  if (pend && store.reel.version > pend.version) {
+  if (pend && store.master.version > pend.version) {
     const from = pend.version;
     const sent = adoptNewReel(raw);
     landed = sent.length ? startCheck(sent, from) : null;
     store.data.pending = null;
   }
-  store.data.seenVersion = store.reel.version;
+  store.data.seenVersion = store.master.version;
   persist();
 
   build();
@@ -552,6 +585,9 @@ async function boot() {
   initExport(ui.exportBtn);
   initKeys();
   initDrop();
+  initOutputs(ui.outBar, ui.frame);
+  bus.on('output', ({ t }) => showOutput(t));
+  bus.on('outputs-raw', ({ raw }) => raw && typeof raw === 'object' && applyRaw(raw));
 
   bus.on('time', ({ t }) => {
     updateTime(t);
@@ -652,7 +688,7 @@ async function boot() {
   bus.emit('reel', {});
   if (landed) {
     flashCue();
-    arrival = { version: store.reel.version, text: `v${store.reel.version} is in · check ${landed.items.length} change${landed.items.length === 1 ? '' : 's'}`, until: Date.now() + 12000 };
+    arrival = { version: store.master.version, text: `v${store.master.version} is in · check ${landed.items.length} change${landed.items.length === 1 ? '' : 's'}`, until: Date.now() + 12000 };
     setTab('changes');
     updateHeader();
   }

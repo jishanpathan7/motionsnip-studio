@@ -231,6 +231,7 @@ function positionMusic() {
   const a = effectiveAudio();
   const has = !!a.music;
   tl.musicEmpty.hidden = has;
+  tl.musicEmpty.textContent = store.reel.derived ? 'Music is mixed into this version' : 'No music · drop a track anywhere, or Upload in Sound';
   tl.musicClip.hidden = !has;
   tl.fadeHandle.hidden = !has;
   tl.fadeShade.hidden = !has;
