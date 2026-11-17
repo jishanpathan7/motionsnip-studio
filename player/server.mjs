@@ -792,6 +792,7 @@ async function plainReel(ctx) {
     path: ctx.dir,
     file,
     plain: true,
+    audio: { videoAudio: 'mix' }, // its sound is the whole soundtrack, not effects
     scenes: [],
   };
   if (info.duration > 0) reel.duration = Math.round(info.duration * 1000) / 1000;
