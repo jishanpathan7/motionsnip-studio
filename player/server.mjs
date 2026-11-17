@@ -1356,6 +1356,15 @@ async function apiFormats(ctx, res) {
 /** Where a scene's last export is remembered (scene.json stays Claude's file). */
 const renderFile = (ctx) => path.join(ctx.dir, '.motionsnip', 'render.json');
 
+/** Whether a media file has a sound track (cached per file version). */
+async function hasSound(ctx, ff, file) {
+  const st = fs.statSync(file);
+  const sig = `${file}:${st.size}:${st.mtimeMs}`;
+  ctx.sound ||= new Map();
+  if (!ctx.sound.has(sig)) ctx.sound.set(sig, probe(ff, file).then((i) => !!i.hasAudio, () => true));
+  return ctx.sound.get(sig);
+}
+
 async function apiFramesStart(ctx, req, res) {
   // a frame export whose page went away (reload, closed tab) stops blocking after 20 s without frames
   const stale = ctx.frames && Date.now() - ctx.frames.last > 20000;
@@ -1383,6 +1392,7 @@ async function apiFramesStart(ctx, req, res) {
   for (const c of (Array.isArray(body.audio) ? body.audio : []).slice(0, 32)) {
     const file = typeof c?.src === 'string' ? resolveInside(ctx.dir, c.src) : null;
     if (!file || !isFile(file)) throw httpError(400, `Audio not found in the project: ${c?.src}`);
+    if (!(await hasSound(ctx, ff, file))) continue; // a video clip with no sound track adds nothing to the mix
     audio.push({ file, at: num(c.at, 0), in: num(c.in, 0), out: num(c.out, null), gain: num(c.gain, 1), fadeIn: num(c.fadeIn, 0), fadeOut: num(c.fadeOut, 0) });
   }
   const reel = await loadReel(ctx);
@@ -2439,6 +2449,21 @@ async function selftest() {
       assert.deepEqual([e.tracks[3].id, e.tracks[3].clips[0].id, e.tracks[3].clips[0].at], ['g2', 'c1', 2], 'new ids are the smallest free ones');
       assert.deepEqual(T.normTimeline(e, { scenes }).markers.map((m) => m.name), ['Hook']);
       assert.deepEqual(O.ensureIds({ tracks: [{ kind: 'audio', clips: [{}, { id: 'c1' }] }] }).tracks[0].clips.map((c) => c.id), ['c2', 'c1']);
+
+      // graphics: presets settle, a scene cut hides the scene's own transition, CSS matches the canvas transform
+      const G = await import('./app/comp/graphics.mjs');
+      const popEnd = G.presetAt({ preset: 'pop', dur: 3 }, 1, 1080);
+      assert.ok(Math.abs(popEnd.scale - 1) < 1e-9 && popEnd.opacity === 1);
+      assert.ok(G.presetAt({ preset: 'pop', dur: 3 }, 0.3, 1080).scale > 1, 'pop overshoots');
+      assert.ok(G.presetAt({ preset: 'fade', dur: 3 }, 2.9, 1080).opacity < 1, 'presets fade out at the end');
+      assert.equal(G.presetAt({ preset: 'word-stagger', dur: 3 }, 0, 1080).word(2).a, 0);
+      assert.deepEqual(G.lookMatrix({}), { M: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], k: 1, o: 0 });
+      const css = G.cssFor([0, 0, 960, 540], { x: 10, y: 0, scale: 1.5, rotate: 0, opacity: 0.5, reveal: 0.5 }, 1920, 1080);
+      assert.equal(css.transform, 'translate(20%, 0%) rotate(0deg) scale(1.5)');
+      assert.equal(css.clipPath, 'inset(0 50% 0 0)');
+      const cutTl = T.normTimeline({ tracks: [{ kind: 'scene', clips: [{ scene: 'scene.json', shots: ['two'], at: 0 }, { scene: 'scene.json', at: 4 }] }] }, { scenes });
+      assert.equal(T.evalAt(cutTl, 0.1).layers[0].sceneCut, true, 'the first shot of a clip is a cut');
+      assert.equal(T.evalAt(cutTl, 6.1).layers[0].sceneCut, false, 'shot two after shot one plays the scene transition');
 
       // over HTTP
       const td = mkTmp();

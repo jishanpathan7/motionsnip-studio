@@ -331,19 +331,31 @@ export function clipState(clip, u) {
   return s;
 }
 
-/** Where a scene clip's local time lands in its scene.json, shot by shot. */
-export function sceneTime(tl, clip, u) {
+/**
+ * Where a scene clip's local time lands in its scene.json, shot by shot: { t, cut } where cut is true when the
+ * shot doesn't follow its scene neighbour here (the first shot of the clip, or one after a skipped shot),
+ * so the scene's own transition into it must not show the shot before.
+ */
+export function sceneAt(tl, clip, u) {
   const spec = tl.scenes[clip.scene];
   if (!spec) return null;
   let left = clip.in + u;
+  let prev = null;
   for (const id of clip.shots) {
     const s = spec.shots.find((x) => x.id === id);
     if (!s) continue;
-    if (left < s.dur || id === clip.shots[clip.shots.length - 1]) return s.t0 + Math.min(left, s.dur - 1e-3);
+    if (left < s.dur || id === clip.shots[clip.shots.length - 1]) {
+      const cut = !prev || prev.index !== s.index - 1;
+      return { t: s.t0 + Math.min(Math.max(0, left), s.dur - 1e-3), cut };
+    }
     left -= s.dur;
+    prev = s;
   }
   return null;
 }
+
+/** Where a scene clip's local time lands in its scene.json (seconds), or null. */
+export const sceneTime = (tl, clip, u) => sceneAt(tl, clip, u)?.t ?? null;
 
 /** The source time a media clip shows at timeline time t. */
 export const sourceTime = (clip, t) => clip.in + (t - clip.at);
@@ -363,7 +375,11 @@ export function evalAt(tl, t) {
       const u = t - c.at;
       if (VISUAL.has(tr.kind) && !tr.hide && (!soloV || tr.solo)) {
         const L = { track: tr, clip: c, u, state: clipState(c, u) };
-        if (tr.kind === 'scene') L.sceneT = sceneTime(tl, c, u);
+        if (tr.kind === 'scene') {
+          const at = sceneAt(tl, c, u);
+          L.sceneT = at ? at.t : null;
+          L.sceneCut = !!at?.cut;
+        }
         if (tr.kind === 'video') L.srcT = sourceTime(c, t);
         layers.push(L);
       }
@@ -563,7 +579,8 @@ export function lint(tlOrRaw, { exists = null, scenes } = {}) {
       if (prev && c.at < prev.end - 0.02) {
         const overlap = prev.end - c.at;
         const blend = Math.max(c.enter?.dur || 0, prev.exit?.dur || 0);
-        if (tr.kind !== 'audio' && overlap > blend + 0.02) add({ ...where, title: `${label} covers the end of ${clipLabel(tr, prev)}`, detail: `${r3(overlap)} s overlap on ${tr.name}.`, fix: blend ? `Overlap by at most ${blend} s, the length of the transition.` : 'Move it later, or give it an enter transition to blend.' });
+        if (tr.kind === 'captions') add({ ...where, title: 'Two captions at once', detail: `${r3(overlap)} s overlap with “${(prev.text || '').slice(0, 30)}”.`, fix: 'Start it after the one before ends.' });
+        else if ((tr.kind === 'video' || tr.kind === 'scene') && overlap > blend + 0.02) add({ ...where, title: `${label} covers the end of ${clipLabel(tr, prev)}`, detail: `${r3(overlap)} s overlap on ${tr.name}.`, fix: blend ? `Overlap by at most ${blend} s, the length of the transition.` : 'Move it later, or give it an enter transition to blend.' });
       }
       if ((tr.kind === 'captions' || (tr.kind === 'graphics' && c.type === 'text')) && c.text) {
         const words = c.text.trim().split(/\s+/).filter(Boolean).length;

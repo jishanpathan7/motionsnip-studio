@@ -1,0 +1,50 @@
+{
+  "title": "Idea to video",
+  "version": 1,
+  "size": [1920, 1080],
+  "fps": 30,
+  "bg": "#0c0c10",
+  "tracks": [
+    {
+      "id": "v1", "kind": "video", "name": "Footage",
+      "clips": [
+        { "id": "intro", "name": "Intro clip", "src": "clip.mp4", "at": 0, "in": 0, "out": 6, "gain": 0.6,
+          "look": { "saturation": 0.2, "contrast": 0.1 }, "keys": { "scale": [[0, 1], [6, 1.08, "inOut"]] } }
+      ]
+    },
+    {
+      "id": "s1", "kind": "scene", "name": "Story",
+      "clips": [
+        { "id": "story", "scene": "scene.json", "shots": ["help", "shipped"], "at": 5.5, "enter": { "kind": "fade", "dur": 0.5 } }
+      ]
+    },
+    {
+      "id": "g1", "kind": "graphics", "name": "Titles",
+      "clips": [
+        { "id": "title", "type": "text", "text": "Every video starts as an idea", "at": 0.6, "dur": 3.4, "preset": "pop",
+          "box": [10, 38, 80, 24], "style": { "size": 8, "color": "#ffffff", "weight": 800 } },
+        { "id": "bar", "type": "shape", "at": 2.4, "dur": 3, "box": [6, 76, 30, 9], "fill": "#ff4fa3", "radius": 20,
+          "enter": { "kind": "wipe", "dur": 0.5 }, "exit": { "kind": "fade", "dur": 0.3 } },
+        { "id": "lower", "type": "text", "text": "Ana · product designer", "at": 2.6, "dur": 2.8, "preset": "slide-up",
+          "box": [6, 76, 30, 9], "style": { "size": 4, "color": "#ffffff", "weight": 600, "shadow": false } },
+        { "id": "end", "type": "text", "text": "Made with MotionSnip", "at": 12.6, "dur": 2.4, "preset": "word-stagger",
+          "box": [20, 84, 60, 10], "style": { "size": 4.5, "color": "#1d1d1f", "weight": 700, "shadow": false } }
+      ]
+    },
+    {
+      "id": "a1", "kind": "audio", "name": "Music", "role": "music",
+      "clips": [ { "id": "music", "src": "music.mp3", "at": 3, "in": 0, "out": 12, "gain": 0.8, "fadeIn": 1, "fadeOut": 2 } ]
+    },
+    {
+      "id": "cc1", "kind": "captions", "name": "Captions",
+      "clips": [
+        { "id": "cap1", "at": 6.2, "dur": 2.2, "text": "Tell Claude the idea." },
+        { "id": "cap2", "at": 10.6, "dur": 1.8, "text": "Watch it move." }
+      ]
+    }
+  ],
+  "markers": [
+    { "id": "hook", "name": "Hook", "t": [0, 5.5] },
+    { "id": "story", "name": "Story", "t": [5.5, 15] }
+  ]
+}

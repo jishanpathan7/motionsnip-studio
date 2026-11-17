@@ -552,7 +552,8 @@ function world(spec, s, t, opts) {
 export function frameSVG(spec, t, opts = {}) {
   const [W, H] = spec.size;
   const adj = (st) => (opts.adjust ? opts.adjust(st) || st : st);
-  const s = adj(stateAt(spec, t));
+  // noTrans: a timeline cut into this shot, so the scene's own transition from the shot before doesn't show
+  const s = adj(stateAt(spec, t, opts.noTrans ? { noTrans: true } : undefined));
   const uid = opts.uid || 'ms';
   let inner = world(spec, s, t, opts);
   let defs = '';

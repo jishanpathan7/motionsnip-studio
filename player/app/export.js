@@ -163,7 +163,10 @@ function render() {
     const o = outSpec();
     what.push(`v${reel.version} of ${reel.title} as ${(ex.formats || []).find((f) => f.id === ex.opt.format)?.label || ex.opt.format}, ${o.w}×${o.h} at ${o.fps} fps`);
     if (ex.opt.format === 'gif') what.push('no sound');
-    else what.push(a.music ? `music: ${assetName(a.music)} at ${Math.round(a.musicVol * 100)}%` : 'no music');
+    else if (typeof player.live?.exportAudio === 'function') {
+      const n = player.live.exportAudio().length;
+      what.push(n ? `the sound of ${n} clip${n === 1 ? '' : 's'}, mixed as you hear it` : 'no sound');
+    } else what.push(a.music ? `music: ${assetName(a.music)} at ${Math.round(a.musicVol * 100)}%` : 'no music');
     what.push('with the edits you see');
   } else if (ex.mode === 'edit') {
     what.push(`a new cut of ${reel.title}: ${editSummary()}`);
@@ -276,12 +279,15 @@ async function startFrames() {
   const reel = store.reel;
   const { size, w, h: hgt, fps } = outSpec();
   const frames = Math.max(1, Math.round(reel.duration * fps));
+  const live = player.live;
   const audio = [];
-  if (a.music && ex.opt.format !== 'gif') {
+  // a timeline brings its own sound: every audible clip, mixed by the server
+  if (typeof live.exportAudio === 'function') {
+    if (ex.opt.format !== 'gif') audio.push(...live.exportAudio());
+  } else if (a.music && ex.opt.format !== 'gif') {
     const off = Number(a.musicOffset) || 0;
     audio.push({ src: a.music, at: Math.max(0, off), in: Math.max(0, -off), gain: a.musicVol, fadeOut: a.musicFade || 0 });
   }
-  const live = player.live;
   ex.abort = new AbortController();
   ex.job = { state: 'running', pct: 0, line: 'Starting…' };
   render();

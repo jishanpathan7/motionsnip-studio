@@ -48,22 +48,26 @@ export function createRaster(w, h) {
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
-  let fontCss = null;
 
-  /** Draw an SVG document string over the canvas (scaled to fill it). */
-  async function drawSVG(svg) {
-    if (fontCss === null) fontCss = await inlineFonts(svg);
-    let s = svg.replace('width="100%" height="100%"', `width="${w}" height="${h}"`);
+  /** An SVG document string as a decoded image at w×h, with its web fonts inlined. */
+  async function svgImage(svg, iw = w, ih = h) {
+    const fontCss = await inlineFonts(svg);
+    let s = svg.replace('width="100%" height="100%"', `width="${iw}" height="${ih}"`);
     if (fontCss) s = s.replace(/<svg[^>]*>/, (m) => `${m}<style>${fontCss}</style>`);
     const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' }));
     try {
       const img = new Image();
       img.src = url;
       await img.decode();
-      ctx.drawImage(img, 0, 0, w, h);
+      return img;
     } finally {
       URL.revokeObjectURL(url);
     }
+  }
+
+  /** Draw an SVG document string over the canvas (scaled to fill it). */
+  async function drawSVG(svg) {
+    ctx.drawImage(await svgImage(svg), 0, 0, w, h);
   }
 
   return {
@@ -78,6 +82,7 @@ export function createRaster(w, h) {
       }
     },
     drawSVG,
+    svgImage,
     /** The canvas as PNG bytes. */
     async png() {
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));

@@ -32,6 +32,7 @@ import {
   setMuted,
   setCompare,
   isPlaying,
+  reloadLiveTimeline,
 } from './video.js';
 import { initTimeline, loadTimeline } from './timeline.js';
 import { initOverlay, render as renderOverlay, flashCue } from './overlay.js';
@@ -434,7 +435,20 @@ async function poll() {
 /** Take a reel.json read from the server: a new version, a changed outputs list, or nothing new. */
 function applyRaw(raw) {
   if (Number(raw.version) !== store.master.version) newVersion(raw);
+  else if (raw.timeline && (raw.rev !== store.master.rev || raw.depsRev !== store.master.depsRev)) timelineChanged(raw);
   else if (outputsSig(raw) !== outputsSig(store.master)) outputsChanged(raw);
+}
+
+/** timeline.json (or a scene it uses) changed without a new version: an editor save, or Claude mid-round. */
+function timelineChanged(raw) {
+  setReelRaw(raw);
+  if (store.ui.selected && !getEl(store.ui.selected)) select(null);
+  reloadLiveTimeline();
+  loadTimeline();
+  bus.emit('reel', { same: true });
+  renderPanel(true);
+  renderOverlay(true);
+  updateHeader();
 }
 
 /** A cutdown finished or Claude listed a new output: take the new list; reload the video if the one on screen changed. */
