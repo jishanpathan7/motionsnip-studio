@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
 import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
+import { toReel as sceneToReel } from './app/scene/compile.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
 const ROOT = path.dirname(HERE); // the repo / skill folder
@@ -814,6 +815,26 @@ async function plainReel(ctx) {
   return reel;
 }
 
+/**
+ * A scene project (scene.json, no reel.json): the reel is built from the scene, the way plainReel makes one up
+ * for a video. The player draws it live; "src" is the last export, when there is one.
+ */
+function sceneReel(ctx) {
+  const file = path.join(ctx.dir, 'scene.json');
+  let raw;
+  try {
+    raw = parseReel(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    throw httpError(500, `scene.json is not valid JSON: ${err.message}`);
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(500, 'scene.json must be a JSON object');
+  const src = typeof raw.src === 'string' && raw.src && isFile(path.join(ctx.dir, raw.src)) ? raw.src : '';
+  const reel = sceneToReel(raw, { src });
+  reel.path = ctx.dir;
+  reel.file = file;
+  return reel;
+}
+
 // ---------------------------------------------------------------------------
 // The server
 // ---------------------------------------------------------------------------
@@ -1003,7 +1024,7 @@ async function loadReel(ctx) {
 
 async function readReel(ctx) {
   const file = path.join(ctx.dir, 'reel.json');
-  if (!fs.existsSync(file)) return plainReel(ctx);
+  if (!fs.existsSync(file)) return isFile(path.join(ctx.dir, 'scene.json')) && !ctx.video ? sceneReel(ctx) : plainReel(ctx);
   let text;
   try {
     text = fs.readFileSync(file, 'utf8');
@@ -1975,6 +1996,65 @@ async function selftest() {
     } finally {
       await ps.close();
     }
+    // A scene project: scene.json, no reel.json. The reel is built from the scene; the player draws it live.
+    {
+      const sc = await import('./app/scene/compile.mjs');
+      const dr = await import('./app/scene/draw.mjs');
+      const raw = {
+        title: 'T',
+        version: 3,
+        cast: { ana: { kind: 'person' }, bot: { kind: 'robot' } },
+        props: { sign: { kind: 'x', kit: 'sign', text: 'Hi' }, chart: { kit: 'chart', data: [1, 2] } },
+        shots: [
+          { id: 'a', dur: 3, place: { ana: [600, 885], sign: [1200, 885] }, beats: [{ at: 0.2, who: 'ana', do: 'walk', to: [900, 885] }, { at: 1, who: 'ana', do: 'say', dur: 1.5, text: 'This line has far too many words to read in the little time it has on screen here' }] },
+          { id: 'b', dur: 2, in: 'fade', place: { chart: [960, 820] }, beats: [{ at: 0.1, do: 'draw-on', what: 'chart' }, { at: 0.2, who: 'ghost', do: 'wave' }] },
+        ],
+      };
+      const spec = sc.normScene(raw);
+      assert.equal(spec.duration, 5);
+      assert.deepEqual(spec.size, [1920, 1080]);
+      assert.equal(spec.style.preset, 'ink');
+      const reel = sc.toReel(raw);
+      assert.equal(reel.scene, true);
+      assert.deepEqual(reel.live, { type: 'scene', spec: 'scene.json' });
+      assert.deepEqual(reel.scenes.map((x) => x.id), ['a', 'b']);
+      const ana = reel.scenes[0].els.find((e) => e.id === 'ana@a');
+      assert.ok(ana && ana.box.every(Number.isFinite), 'every thing on stage gets a box');
+      assert.equal(ana.props.shirt.path, 'cast.ana.look.shirt');
+      const line = reel.scenes[0].els.find((e) => e.id.startsWith('line'));
+      assert.equal(line.props.text.path, 'shots[0].beats[1].text');
+      assert.ok(reel.review.some((f) => f.title === 'Too fast to read' && f.elId === line.id), 'a line too fast to read is flagged');
+      assert.ok(reel.review.some((f) => /ghost/.test(JSON.stringify(f))), 'a beat for someone not in the cast is flagged');
+      const patched = sc.applyPatches(raw, [{ path: 'props.chart.data', value: '4, 5, 6' }, { path: 'cast.ana.look.shirt', value: '#00ff00' }]);
+      assert.deepEqual(patched.props.chart.data, [4, 5, 6]);
+      assert.equal(raw.props.chart.data.length, 2, 'patches work on a copy');
+      assert.throws(() => sc.applyPatches(raw, [{ path: 'shots[0].dur', value: 99 }]), /Can't change/);
+      assert.throws(() => sc.applyPatches(raw, [{ path: '__proto__.x', value: 1 }]), /Can't change/);
+      const f1 = dr.frameSVG(spec, 1.3);
+      assert.equal(f1, dr.frameSVG(sc.normScene(raw), 1.3), 'the same time draws the same frame');
+      assert.ok(f1.startsWith('<svg') && f1.includes('data-id="ana"'));
+      assert.notEqual(f1, dr.frameSVG(spec, 1.6), 'time moves things');
+      assert.ok(dr.frameSVG(spec, 3.2).includes('opacity'), 'a fade draws both shots');
+
+      const dir = mkTmp();
+      fs.writeFileSync(path.join(dir, 'scene.json'), JSON.stringify(raw));
+      const ss = await startServer({ dir, port: 0, open: false, quiet: true });
+      try {
+        let r = await request(ss.port, 'GET', '/api/reel');
+        assert.equal(r.status, 200);
+        assert.equal(r.json.scene, true);
+        assert.equal(r.json.version, 3);
+        assert.equal(r.json.src, '', 'no export yet');
+        assert.equal(r.json.path, dir);
+        fs.writeFileSync(path.join(dir, 'scene.json'), '{ nope');
+        r = await request(ss.port, 'GET', '/api/reel');
+        assert.equal(r.status, 500);
+        assert.match(r.json.error, /scene.json is not valid JSON/);
+      } finally {
+        await ss.close();
+      }
+    }
+
     const empty = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true });
     try {
       const r = await request(empty.port, 'GET', '/api/reel');
@@ -2150,7 +2230,8 @@ async function main() {
     console.error(`Project folder or video not found: ${dir}`);
     process.exit(2);
   }
-  if (!video && !isFile(path.join(dir, 'reel.json'))) {
+  if (!video && !isFile(path.join(dir, 'reel.json')) && isFile(path.join(dir, 'scene.json'))) console.log(`Scene project: drawing ${path.join(dir, 'scene.json')} live.`);
+  else if (!video && !isFile(path.join(dir, 'reel.json'))) {
     const found = pickVideo(dir);
     if (found) console.log(`No reel.json in ${dir}: opening ${found} as a plain video.`);
     else console.warn(`Note: no reel.json or video in ${dir} yet. The player will wait for one.`);

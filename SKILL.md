@@ -232,3 +232,72 @@ When a code-built video looks better laid out again than cropped, render that ve
 - An output you list replaces a player cutdown with the same id. The player won't re-render yours.
 - Self-review per output: look at each output's frames too (captions under the platform UI, a logo cut off by the crop) and put findings in that output's `review`.
 
+
+## 10. Scenes: describe an idea, get an animation
+
+When the user describes a scene in words ("a dev stuck on a slow render, a robot hands her an idea", "explain our pipeline", "an abstract intro for the launch") and doesn't need a code renderer, make a **scene project**: a folder with `scene.json` and no `reel.json`. You write data, not animation code. MotionSnip Studio draws it live in a hand-drawn style, builds the reel from it (shots become scenes, the cast and props become elements, every line of dialogue is editable) and runs its own checks, which show as self-review rings.
+
+**The loop:**
+
+1. Pin down the idea in one line: who, what changes, what the viewer should feel.
+2. Pitch 2 or 3 visual metaphors in a sentence each (for example "the render bar as a mountain she climbs" or "a robot that hands over a lit bulb"). Let the user pick unless they asked you to just make it.
+3. Write `scene.json` in a new folder and open the player on it: `node "<skill dir>/player/server.mjs" "<folder>"`.
+4. Look at it before you show it: scrub each shot, read the rings (lines too fast to read, a line cut off by the next shot, things off the frame, names that point at nothing) and fix them.
+5. Feedback works as for any project, except you edit `scene.json` and bump its `version`. Lines name exact paths, like `scene.json › shots[0].beats[1].text`; a moved box says how many pixels to move that thing in that shot. Keep ids stable so notes and rings stay attached.
+
+**The format:**
+
+```jsonc
+{
+  "title": "Idea to animation", "version": 1,
+  "size": [1920, 1080], "fps": 30,                       // the stage; positions are in these pixels
+  "style": { "preset": "ink" },                          // ink | marker | flat; override "palette", "wobble", "stroke", "font"
+  "cast": {
+    "ana":  { "kind": "person", "name": "Ana", "look": { "hair": "bun", "shirt": "accent" } },
+    "bolt": { "kind": "robot",  "name": "Bolt", "look": { "body": "soft" } }
+  },
+  "props": {
+    "laptop": { "kit": "laptop", "text": "render 12%" },
+    "chart":  { "kit": "chart", "data": [2, 3, 5, 9] },
+    "rocket": { "draw": "M0 40 L20 0 L40 40 Z", "fill": "accent" },   // any SVG path, scaled to fit
+    "logo":   { "image": "assets/logo.svg" }                           // a file in the project
+  },
+  "shots": [
+    { "id": "stuck", "name": "Stuck", "dur": 4.5,
+      "place": { "ana": [770, 885], "laptop": [930, 715] },           // bottom centre of each thing
+      "beats": [
+        { "at": 0.3, "who": "ana", "do": "type", "dur": 1.4 },
+        { "at": 1.5, "who": "ana", "do": "say", "text": "Another forty-minute render?" },
+        { "at": 3.1, "who": "ana", "do": "emote", "as": "frustrated" } ] },
+    { "id": "help", "name": "Help arrives", "dur": 5, "in": "fade",
+      "place": { "laptop": null, "bulb": [1180, 520] },               // null takes a thing off stage
+      "beats": [ { "at": 0.2, "who": "bolt", "do": "enter", "from": "right", "to": [1240, 885] } ] }
+  ]
+}
+```
+
+- Things keep their place from shot to shot unless `place` moves them. The floor is at 82% of the height (y 885 on a 1080 stage); people stand on it.
+- Palette names (`ink`, `paper`, `accent`, `soft`, `second`) or any colour work wherever a colour goes. The player shows them as `brand.<name>`.
+- `in` is how a shot starts: `cut` (default), `fade`, `wipe`, `push` or `match:<id>` (the camera pushes into that thing and comes out of it in the next shot). `camera: { "on": "ana", "zoom": 1.2 }` frames a shot; `tempo` above 1 makes everything in it quicker.
+- Kit props: laptop, phone, screen, doc, box, cloud, database, sign, chart, desk, plant, star, check, bulb, text (`size`, `bold`), arrow (`from` and `to`: ids or points, `bend`). Anything else is `draw` (an SVG path) or `image`. `text` with `{n}` shows a `count` beat's number.
+- Every beat has `at` (seconds into the shot) and optional `dur` and `ease` (`linear`, `in`, `out`, `inOut`, `back`, `spring`).
+
+| Verb | Fields | What happens |
+|---|---|---|
+| `walk`, `run` | `who`, `to` (point or id) | Walks with planted feet; time comes from the distance |
+| `enter`, `exit` | `who`, `from`/`to` (`left`, `right` or a point) | Walks in from off stage, or out |
+| `say`, `think` | `who`, `text` | Speech or thought bubble, typed on; reading time comes from the words |
+| `emote` | `who`, `as` (`happy`, `sad`, `surprised`, `frustrated`, `thinking`, `neutral`) | Face and body |
+| `point`, `look` | `who`, `at` (id or point) | Points or turns toward it |
+| `wave`, `cheer`, `type`, `nod`, `jump` | `who` | Gestures |
+| `pick`, `hand`, `put` | `who`, `what`, `to` (`hand`: a person; `put`: a point) | Picks up, hands over, puts down, along an arc |
+| `move` | `what`, `to`, `arc` | Moves a thing |
+| `pop`, `fade-in`, `draw-on` | `what` | Appears: springs in, fades in, or draws itself on (charts grow) |
+| `fade` | `what`, `to` (0 hides it) | Fades |
+| `grow`, `shake` | `what`, `to` (scale) | Emphasis |
+| `count` | `what`, `from`, `to` | Rolls a number in its `text` |
+| `camera` | `on` (id or point), `zoom` | Moves the camera |
+
+**Plain words to fields:** "slower" is a higher `dur` or a shot `tempo` below 1; "more bounce" is `"ease": "back"` or `"spring"`; "brand colours" is `style.palette`; "make it chalky / cleaner" is `style.preset` or `wobble`; "add a dog" is a new prop (`draw` path) placed in a shot; "she should notice the chart" is a `look` or `point` beat before the line.
+
+Don't draw real people, logos or characters you don't have rights to. Export to video comes in a later version; for now the scene plays live in the player.
