@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PAGES, page } from './docs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'dist');
@@ -42,6 +43,16 @@ fs.writeFileSync(path.join(OUT, 'demo', 'index.html'), demo);
 
 // demo project files, served where the player expects them (/p/*)
 for (const f of ['reel.json', 'video.mp4', 'music.mp3', 'outputs']) copy(`examples/demo/${f}`, `p/${f}`);
+
+// docs and install pages, rendered from the repo's Markdown (site/docs.mjs), and the skill itself as a
+// stable link (/skill.md)
+copy('site/docs.css', 'docs.css');
+for (const pg of PAGES) {
+  const dir = path.join(OUT, pg.url);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), page(pg, fs.readFileSync(rel(pg.file), 'utf8')));
+}
+copy('SKILL.md', 'skill.md');
 
 const count = (d) => fs.readdirSync(d, { withFileTypes: true }).reduce((n, e) => n + (e.isDirectory() ? count(path.join(d, e.name)) : 1), 0);
 console.log(`Built ${count(OUT)} files into dist/`);

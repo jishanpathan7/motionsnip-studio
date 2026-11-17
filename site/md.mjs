@@ -39,12 +39,25 @@ function inline(text, opts) {
 const isFence = (l) => /^\s*```/.test(l);
 const listMark = (l) => /^(\s*)([-*]|\d+\.)\s+(.*)$/.exec(l);
 const isTableRow = (l) => /^\s*\|.*\|\s*$/.test(l);
-const cells = (l) =>
-  l
-    .trim()
-    .replace(/^\||\|$/g, '')
-    .split(/(?<!\\)\|/)
-    .map((c) => c.trim().replace(/\\\|/g, '|'));
+// table cells; a pipe inside a code span or escaped as \| stays in its cell
+const cells = (l) => {
+  const out = [''];
+  let code = false;
+  const s = l.trim().replace(/^\||\|$/g, '');
+  for (let k = 0; k < s.length; k++) {
+    const ch = s[k];
+    if (ch === '\\' && s[k + 1] === '|') {
+      out[out.length - 1] += '|';
+      k++;
+    } else if (ch === '`') {
+      code = !code;
+      out[out.length - 1] += ch;
+    } else if (ch === '|' && !code) out.push('');
+    else out[out.length - 1] += ch;
+  }
+  return out.map((c) => c.trim());
+};
+const ordered = (m) => /\d/.test(m[2]);
 
 export function render(md, opts = {}) {
   const o = { link: (h) => h, ...opts };
@@ -67,12 +80,11 @@ export function render(md, opts = {}) {
 
   // a list starting at line i with the given indent; returns html
   const list = (indent) => {
-    const first = listMark(lines[i]);
-    const ordered = /\d/.test(first[2]);
+    const isOl = ordered(listMark(lines[i]));
     const items = [];
     while (i < lines.length) {
       const m = listMark(lines[i]);
-      if (!m || m[1].length !== indent) break;
+      if (!m || m[1].length !== indent || ordered(m) !== isOl) break;
       let body = [m[3]];
       let sub = '';
       i++;
@@ -88,9 +100,10 @@ export function render(md, opts = {}) {
       }
       items.push(`<li>${inline(body.join(' '), o)}${sub}</li>`);
       // a blank line between items of the same list keeps the list going
-      if (i < lines.length && lines[i].trim() === '' && listMark(lines[i + 1] || '')?.[1].length === indent) i++;
+      const next = listMark(lines[i + 1] || '');
+      if (i < lines.length && lines[i].trim() === '' && next?.[1].length === indent && ordered(next) === isOl) i++;
     }
-    return ordered ? `<ol>${items.join('')}</ol>` : `<ul>${items.join('')}</ul>`;
+    return isOl ?`<ol>${items.join('')}</ol>` : `<ul>${items.join('')}</ul>`;
   };
 
   while (i < lines.length) {
