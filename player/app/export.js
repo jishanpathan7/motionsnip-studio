@@ -2,6 +2,7 @@
 
 import { store, bus, effectiveAudio, approvedCount, assetName, findChange } from './state.js';
 import { api, h, icon, projectUrl, round, toast } from './util.js';
+import { hasEdits, summary as editSummary, exportEdit } from './vedit.js';
 
 const ex = { dlg: null, body: null, job: null, poll: 0, btn: null, mode: 'mix', ffmpeg: null };
 
@@ -18,6 +19,7 @@ export function initExport(button) {
   bus.on('changes', updateButton);
   bus.on('status', updateButton);
   bus.on('reel', updateButton);
+  bus.on('vedit', updateButton);
   // pick up a job that was already running (e.g. after a reload)
   api('/api/export')
     .then((j) => {
@@ -37,6 +39,7 @@ export function exportLabel() {
   if (!store.reel) return 'Export';
   if (ex.job?.state === 'running') return `Exporting ${Math.round(ex.job.pct || 0)}%`;
   const all = store.reel.scenes.length && approvedCount() === store.reel.scenes.length;
+  if (hasEdits()) return 'Export with your edits';
   if (findChange('audio:music')) return 'Export with new music';
   if (audioChanged()) return 'Export with new levels';
   if (all) return 'Export final';
@@ -51,7 +54,7 @@ export function updateButton() {
 }
 
 async function open() {
-  ex.mode = canRender() && needsClaude().length ? 'render' : 'mix';
+  ex.mode = hasEdits() ? 'edit' : canRender() && needsClaude().length ? 'render' : 'mix';
   render();
   if (!ex.dlg.open) ex.dlg.showModal();
   try {
@@ -104,7 +107,11 @@ function render() {
   }
 
   const what = [];
-  if (ex.mode === 'mix') {
+  if (ex.mode === 'edit') {
+    what.push(`a new cut of ${reel.title}: ${editSummary()}`);
+    what.push(a.music ? `music: ${assetName(a.music)} at ${Math.round(a.musicVol * 100)}%` : 'no separate music');
+    what.push(`video sound at ${Math.round(a.sfxVol * 100)}%`);
+  } else if (ex.mode === 'mix') {
     what.push(`v${reel.version} of ${reel.title}`);
     what.push(a.music ? `music: ${assetName(a.music)} at ${Math.round(a.musicVol * 100)}%` : 'no separate music');
     what.push(`${reel.audio.videoAudio === 'mix' ? 'video sound' : 'effects'} at ${Math.round(a.sfxVol * 100)}%`);
@@ -115,8 +122,9 @@ function render() {
     what.push(a.music ? `music: ${assetName(a.music)}` : 'no separate music');
   }
   kids.push(h('p.export-what', "You'll get ", what.join(', '), '.'));
+  if (ex.mode === 'edit') kids.push(h('p.small.muted', 'The video is re-encoded with your edits, so this takes a little while. You can keep working. The original file stays as it is.'));
 
-  if (ex.mode === 'mix' && pending.length) {
+  if (ex.mode !== 'render' && pending.length) {
     kids.push(
       h(
         'div.warn',
@@ -128,8 +136,10 @@ function render() {
   if (ex.mode === 'render' && pending.some((c) => c.kind === 'note')) {
     kids.push(h('div.warn', 'Notes need Claude; they are not part of a render.'));
   }
-  if (ex.mode === 'mix' && ex.ffmpeg && !ex.ffmpeg.ok) {
-    kids.push(h('div.warn.warn-bad', 'ffmpeg not found. Install it, or start the server with --ffmpeg /path/to/ffmpeg.'));
+  if (ex.mode !== 'render' && ex.ffmpeg && !ex.ffmpeg.ok) {
+    kids.push(h('div.warn.warn-bad', 'ffmpeg not found. Install it (macOS: brew install ffmpeg), or start the server with --ffmpeg /path/to/ffmpeg.'));
+  } else if (ex.mode === 'edit' && ex.ffmpeg && !ex.ffmpeg.edits) {
+    kids.push(h('div.warn.warn-bad', "This ffmpeg can't apply edits (it has no video filters). Install the full one (macOS: brew install ffmpeg), or start the server with --ffmpeg /path/to/ffmpeg."));
   }
 
   if (job && job.state !== 'idle') {
@@ -165,7 +175,7 @@ function render() {
       h('button.btn.btn-ghost', { type: 'button', onclick: () => ex.dlg.close() }, running ? 'Hide' : 'Close'),
       h(
         'button.btn.btn-primary',
-        { type: 'button', disabled: running || (ex.mode === 'mix' && ex.ffmpeg && !ex.ffmpeg.ok), onclick: start },
+        { type: 'button', disabled: running || (ex.mode !== 'render' && ex.ffmpeg && (!ex.ffmpeg.ok || (ex.mode === 'edit' && !ex.ffmpeg.edits))), onclick: start },
         icon('export', 16),
         running ? 'Exporting…' : job?.state === 'done' ? 'Export again' : 'Export',
       ),
@@ -199,6 +209,17 @@ async function start() {
     musicFade: a.musicFade || 0,
     props: ex.mode === 'render' ? renderProps() : {},
   };
+  if (ex.mode === 'edit') {
+    ex.job = { state: 'running', pct: 0, line: 'Drawing your text and logos…' };
+    render();
+    try {
+      body.edit = await exportEdit();
+    } catch (e) {
+      ex.job = { state: 'error', line: `Couldn't draw the text and logos: ${e.message}` };
+      render();
+      return;
+    }
+  }
   try {
     ex.job = await api('/api/export', { json: body });
   } catch (e) {

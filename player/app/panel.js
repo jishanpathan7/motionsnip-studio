@@ -32,6 +32,7 @@ import { seek, currentTime, player, duration } from './video.js';
 import { pinNote, openNote, editText } from './overlay.js';
 import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount } from './feedback.js';
 import { h, icon, fmtTime, round, clamp, projectUrl, toast, copyText, baseName } from './util.js';
+import { on as plainOn, renderPane as renderPlainEdit } from './vedit.js';
 
 const TABS = [
   ['edit', 'Edit'],
@@ -78,6 +79,8 @@ export function initPanel(root) {
   });
 
   bus.on('tab', () => render(true));
+  bus.on('vedit', (d) => store.ui.tab === 'edit' && render(!!d?.select));
+  bus.on('reel', () => render(true));
   bus.on('select', () => {
     if (store.ui.tab === 'edit') render(true);
   });
@@ -141,6 +144,8 @@ export function render(force = false) {
 
 function updateTabs() {
   for (const b of pn.nav.children) {
+    // a plain video has no script or brand to show
+    b.hidden = !!store.reel?.plain && (b.dataset.tab === 'script' || b.dataset.tab === 'look');
     const on = b.dataset.tab === store.ui.tab;
     b.classList.toggle('is-active', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
@@ -195,6 +200,7 @@ function timeBtn(t, label) {
 // ---------------------------------------------------------------- Edit
 
 function renderEdit() {
+  if (plainOn()) return renderPlainEdit();
   const id = store.ui.selected;
   const el = id && getEl(id);
   if (!el) return renderSceneOverview();

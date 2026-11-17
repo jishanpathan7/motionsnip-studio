@@ -34,6 +34,7 @@ function emptyData() {
     check: null,
     notQuite: [],
     seenVersion: null,
+    vedit: null, // a plain video's own edits (vedit.js)
   };
 }
 

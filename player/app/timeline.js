@@ -1,5 +1,6 @@
 // Timeline: scene strip, music lane (drag = offset, end handle = fade), effects lane, beat grid,
 // scrubbing and hover thumbnails. Waveforms are decoded with Web Audio and drawn as bars.
+// For a plain video, vedit.js draws trim, cuts and a layers lane into the parts timelineParts() hands it.
 
 import { store, bus, effectiveAudio, setAudio, sceneStatus, notes, elHasEdits, getEl, sceneAt, findChange, assetName } from './state.js';
 import { player, duration, seek, currentTime, isPlaying, pause, play } from './video.js';
@@ -37,7 +38,9 @@ const tl = {
 export function initTimeline(host) {
   tl.root = host;
   tl.fxLabel = h('div.tl-label', 'Effects');
-  const labels = h('div.tl-labels', h('div.tl-label', 'Scenes'), h('div.tl-label', 'Music'), tl.fxLabel);
+  tl.scenesLabel = h('div.tl-label', 'Scenes');
+  tl.layersLabel = h('div.tl-label', { hidden: true }, 'On the frame');
+  const labels = h('div.tl-labels', tl.scenesLabel, h('div.tl-label', 'Music'), tl.fxLabel, tl.layersLabel);
 
   tl.grid = h('canvas.tl-grid', { 'aria-hidden': 'true' });
   tl.scenes = h('div.tl-scenes');
@@ -55,6 +58,9 @@ export function initTimeline(host) {
   tl.fxEmpty = h('div.tl-empty', 'Reading the sound…');
   tl.fxLane = h('div.tl-lane.tl-fx', tl.fxCanvas, tl.fxEmpty);
 
+  tl.layersLane = h('div.tl-lane.tl-layers', { hidden: true });
+  tl.edit = h('div.tl-edit'); // trim and cut marks over every lane (plain video)
+
   tl.playhead = h('div.tl-playhead', { 'aria-hidden': 'true' });
   tl.hoverLine = h('div.tl-hoverline', { 'aria-hidden': 'true' });
 
@@ -65,6 +71,8 @@ export function initTimeline(host) {
     tl.scenes,
     tl.musicLane,
     tl.fxLane,
+    tl.layersLane,
+    tl.edit,
     tl.marks,
     tl.hoverLine,
     tl.playhead,
@@ -109,9 +117,15 @@ export function initTimeline(host) {
   bus.on('duration', () => layout());
 }
 
+/** The pieces vedit.js draws into. */
+export function timelineParts() {
+  return { root: tl.root, area: tl.area, edit: tl.edit, layersLane: tl.layersLane, layersLabel: tl.layersLabel, scenesLabel: tl.scenesLabel };
+}
+
 export function loadTimeline() {
   const reel = store.reel;
-  tl.fxLabel.textContent = reel.audio.videoAudio === 'mix' ? 'Video sound' : 'Effects';
+  tl.fxLabel.textContent = reel.plain ? 'Video sound' : reel.audio.videoAudio === 'mix' ? 'Video sound' : 'Effects';
+  tl.scenesLabel.textContent = reel.plain ? 'Edit' : 'Scenes';
   if (reel.src) {
     tl.thumb.src = projectUrl(reel.src) + `?v=${reel.version}&thumb`;
     tl.thumb.load();

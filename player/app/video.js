@@ -1,5 +1,8 @@
 // Playback: the video (or the live renderer), the music beside it, Web Audio gains, takes and compare.
 //
+// A plain video's trim and cuts plug in through `hooks` (vedit.js): playback skips the cut parts, and the
+// music follows the edited clock, the way the export will sound.
+//
 // The video element is the clock. Music plays in its own <audio> element and is kept within 60 ms of
 // `videoTime - musicOffset`. Gains are applied through Web Audio once the reviewer has interacted with the
 // page (browsers only allow audio after a gesture); until then element volumes are used.
@@ -33,6 +36,18 @@ export const player = {
   _lastLiveT: -1,
   _musicSrc: null,
   _playing: false,
+};
+
+/** Set by vedit.js for a plain video with trim/cuts. Defaults: nothing is cut. */
+export const hooks = {
+  /** Source time -> time in the edited video. */
+  outT: (t) => t,
+  /** Length of the edited video, or null to use duration(). */
+  outDur: () => null,
+  /** While playing: skip cuts, stop at the end. Returns true when it stopped playback. */
+  frame: () => false,
+  /** Before play starts: move into the kept part. */
+  beforePlay: () => {},
 };
 
 export function duration() {
@@ -73,15 +88,26 @@ export function initPlayback({ video, music, cmp, liveHost, frameMsg }) {
   video.addEventListener('loadedmetadata', () => {
     player.videoOk = true;
     frameMsg.hidden = true;
+    // a plain video's real picture size (the browser applies rotation), so the frame has its shape
+    if (store.reel?.plain && video.videoWidth && video.videoHeight) {
+      store.reel.w = video.videoWidth;
+      store.reel.h = video.videoHeight;
+    }
     bus.emit('duration', {});
+  });
+  // rAF stops in background tabs; timeupdate (about 4 a second) still skips cuts there
+  video.addEventListener('timeupdate', () => {
+    if (player._playing && hooks.frame()) bus.emit('time', { t: currentTime() });
   });
   video.addEventListener('error', () => {
     player.videoOk = false;
     if (!player.live) {
       frameMsg.hidden = false;
-      frameMsg.textContent = store.reel?.src
-        ? `Can't play ${store.reel.src}. Check that the file exists and "src" in reel.json points at it.`
-        : 'reel.json has no "src" video yet.';
+      frameMsg.textContent = store.reel?.plain
+        ? `Can't play ${store.reel.src}. The browser may not support this video's format; an mp4 (H.264) always works.`
+        : store.reel?.src
+          ? `Can't play ${store.reel.src}. Check that the file exists and "src" in reel.json points at it.`
+          : 'reel.json has no "src" video yet.';
     }
   });
   video.addEventListener('ended', () => {
@@ -208,9 +234,9 @@ export function ensureAudio() {
 }
 
 function fadeFactor(t, a) {
-  const d = duration();
+  const d = hooks.outDur() ?? duration();
   if (!(a.musicFade > 0) || !d) return 1;
-  return clamp((d - t) / a.musicFade, 0, 1);
+  return clamp((d - hooks.outT(t)) / a.musicFade, 0, 1);
 }
 
 function applyGains(immediate = false) {
@@ -249,6 +275,7 @@ export function play() {
   ensureAudio();
   const d = duration();
   if (d && currentTime() >= d - 1 / fps()) seek(0);
+  hooks.beforePlay();
   setPlaying(true);
   if (player.videoOk) {
     player.video.playbackRate = player.rate;
@@ -353,7 +380,7 @@ function syncMusic(hard = false) {
   }
   const a = effectiveAudio();
   const t = currentTime();
-  const mt = t - (a.musicOffset || 0);
+  const mt = hooks.outT(t) - (a.musicOffset || 0);
   const inRange = mt >= 0 && mt < (player.musicDuration || Infinity) - 0.02;
   if (player._playing && inRange) {
     if (m.paused) {
@@ -385,6 +412,8 @@ function tick() {
         if (player.videoOk && player.video.paused) player.video.play().catch(() => {});
         t = currentTime();
       }
+    } else if (hooks.frame()) {
+      t = currentTime();
     } else if (d && t >= d) {
       pause();
       t = d;
