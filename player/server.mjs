@@ -23,7 +23,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
 import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
-import { toReel as sceneToReel } from './app/scene/compile.mjs';
+import { toReel as sceneToReel, applyPatches as applyScenePatches } from './app/scene/compile.mjs';
+import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline } from './app/comp/timeline.mjs';
+import { applyOps } from './app/comp/ops.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, countPngs } from './lib/frames.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
@@ -829,18 +831,110 @@ function sceneReel(ctx) {
     throw httpError(500, `scene.json is not valid JSON: ${err.message}`);
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(500, 'scene.json must be a JSON object');
-  let src = typeof raw.src === 'string' && raw.src && isFile(path.join(ctx.dir, raw.src)) ? raw.src : '';
-  if (!src) {
-    // the last export of this version, so takes, compare and cutdowns have a video
-    try {
-      const r = JSON.parse(fs.readFileSync(renderFile(ctx), 'utf8'));
-      if (r && r.version === (Number(raw.version) || 1) && typeof r.src === 'string' && isFile(path.join(ctx.dir, r.src))) src = r.src;
-    } catch {}
-  }
+  const src = typeof raw.src === 'string' && raw.src && isFile(path.join(ctx.dir, raw.src)) ? raw.src : lastRender(ctx, raw.version);
   const reel = sceneToReel(raw, { src });
   reel.path = ctx.dir;
   reel.file = file;
   return reel;
+}
+
+/** The last export of this version, so takes, compare and cutdowns have a video ('' when there is none). */
+function lastRender(ctx, version) {
+  try {
+    const r = JSON.parse(fs.readFileSync(renderFile(ctx), 'utf8'));
+    if (r && r.version === (Number(version) || 1) && typeof r.src === 'string' && isFile(path.join(ctx.dir, r.src))) return r.src;
+  } catch {}
+  return '';
+}
+
+/** A project file as JSON: { raw, text, rev } where rev is a short hash of the text (who saved last). */
+function readProjectFile(ctx, rel) {
+  const file = resolveInside(ctx.dir, rel);
+  if (!file || !isFile(file)) throw httpError(404, `${rel} not found`);
+  const text = fs.readFileSync(file, 'utf8');
+  let raw;
+  try {
+    raw = parseReel(text);
+  } catch (err) {
+    throw httpError(500, `${rel} is not valid JSON: ${err.message}`);
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(500, `${rel} must be a JSON object`);
+  return { file, raw, text, rev: crypto.createHash('sha1').update(text).digest('hex').slice(0, 12) };
+}
+
+/** The scene files a timeline's scene clips use: { 'scene.json': raw }. Unreadable ones are left out (lint says so). */
+function timelineScenes(ctx, raw) {
+  const out = {};
+  for (const t of Array.isArray(raw.tracks) ? raw.tracks : [])
+    for (const c of t?.kind === 'scene' && Array.isArray(t.clips) ? t.clips : []) {
+      const rel = typeof c?.scene === 'string' && c.scene ? c.scene : 'scene.json';
+      if (rel in out || !rel.endsWith('.json')) continue;
+      try {
+        out[rel] = readProjectFile(ctx, rel).raw;
+      } catch {}
+    }
+  return out;
+}
+
+/**
+ * A timeline project (timeline.json, no reel.json): the reel is built from the composition. The player draws it
+ * live; "src" is the last export of this version. rev is timeline.json's, depsRev the scene files'.
+ */
+function timelineReel(ctx) {
+  const { raw, rev, file } = readProjectFile(ctx, 'timeline.json');
+  const scenes = timelineScenes(ctx, raw);
+  const exists = (rel) => {
+    const f = resolveInside(ctx.dir, rel);
+    return !!f && isFile(f);
+  };
+  const reel = timelineToReel(raw, { scenes, src: lastRender(ctx, raw.version), exists });
+  reel.rev = rev; // the base for the editor's saves
+  reel.depsRev = crypto.createHash('sha1').update(JSON.stringify(scenes)).digest('hex').slice(0, 12); // the scenes it uses
+  reel.path = ctx.dir;
+  reel.file = file;
+  return reel;
+}
+
+/**
+ * Write the player's edits into timeline.json or a scene file, without Claude.
+ * body: { file, base?, bump?, patches?: [{ path, value }], ops?: [...], timeline?: {...} }
+ *   base: the rev the edit was made on; a different file on disk is a 409 (reload, then edit again).
+ *   bump: start a new version (Apply); plain editor saves keep the version.
+ */
+async function apiProjectApply(ctx, req, res) {
+  const body = (await readJson(req)) || {};
+  const rel = typeof body.file === 'string' ? body.file : '';
+  const isTimeline = rel === 'timeline.json';
+  if (!isTimeline) {
+    // a scene file: scene.json, or one the timeline uses
+    let ok = rel === 'scene.json';
+    if (!ok && rel.endsWith('.json') && isFile(path.join(ctx.dir, 'timeline.json'))) ok = rel in timelineScenes(ctx, readProjectFile(ctx, 'timeline.json').raw);
+    if (!ok) throw httpError(400, `Can't edit ${rel || 'that file'} here`);
+  }
+  const cur = readProjectFile(ctx, rel);
+  if (body.base && body.base !== cur.rev) return sendJson(res, 409, { error: `${rel} changed since you started this edit`, rev: cur.rev });
+  let out = cur.raw;
+  try {
+    if (isTimeline) {
+      const scenes = timelineScenes(ctx, cur.raw);
+      if (body.timeline !== undefined) {
+        if (!body.timeline || typeof body.timeline !== 'object' || Array.isArray(body.timeline)) throw new Error('timeline must be a JSON object');
+        normTimeline(body.timeline, { scenes });
+        out = body.timeline;
+      }
+      if (Array.isArray(body.ops) && body.ops.length) out = applyOps(out, body.ops, { scenes });
+      if (Array.isArray(body.patches) && body.patches.length) out = applyTimelinePatches(out, body.patches, { scenes });
+    } else {
+      if (body.ops || body.timeline) throw new Error('Scenes take patches only');
+      if (Array.isArray(body.patches) && body.patches.length) out = applyScenePatches(out, body.patches);
+    }
+  } catch (err) {
+    throw httpError(400, err.message);
+  }
+  if (body.bump) out = { ...out, version: (Math.round(Number(out.version)) || 1) + 1 };
+  const text = JSON.stringify(out, null, 2) + '\n';
+  await writeAtomic(cur.file, text);
+  return sendJson(res, 200, { ok: true, rev: crypto.createHash('sha1').update(text).digest('hex').slice(0, 12), version: Number(out.version) || 1 });
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1108,8 @@ async function api(ctx, req, res, route, url) {
       return apiCutdownRemove(ctx, req, res);
     case 'GET formats':
       return apiFormats(ctx, res);
+    case 'POST project-apply':
+      return apiProjectApply(ctx, req, res);
     case 'POST frames-start':
       return apiFramesStart(ctx, req, res);
     case 'POST frames-push':
@@ -1040,7 +1136,11 @@ async function loadReel(ctx) {
 
 async function readReel(ctx) {
   const file = path.join(ctx.dir, 'reel.json');
-  if (!fs.existsSync(file)) return isFile(path.join(ctx.dir, 'scene.json')) && !ctx.video ? sceneReel(ctx) : plainReel(ctx);
+  if (!fs.existsSync(file)) {
+    if (ctx.video) return plainReel(ctx);
+    if (isFile(path.join(ctx.dir, 'timeline.json'))) return timelineReel(ctx);
+    return isFile(path.join(ctx.dir, 'scene.json')) ? sceneReel(ctx) : plainReel(ctx);
+  }
   let text;
   try {
     text = fs.readFileSync(file, 'utf8');
@@ -2243,6 +2343,162 @@ async function selftest() {
       await empty.close();
     }
 
+    // A timeline project: timeline.json, no reel.json. Pure model, edit ops, then the reel and Apply over HTTP.
+    {
+      const T = await import('./app/comp/timeline.mjs');
+      const O = await import('./app/comp/ops.mjs');
+      const sceneRaw = { title: 'S', version: 1, size: [1920, 1080], fps: 30, cast: { ana: { kind: 'person', name: 'Ana' } }, props: {}, shots: [{ id: 'one', dur: 2, place: { ana: [900, 885] } }, { id: 'two', dur: 3, place: { ana: [900, 885] } }] };
+      const raw = {
+        title: 'Launch',
+        version: 1,
+        tracks: [
+          { kind: 'video', clips: [{ src: 'a.mp4', at: 0, in: 2, out: 6, enter: { kind: 'fade', dur: 0.5 } }, { src: 'b.mp4', at: 3.8, out: 3, enter: 'fade' }] },
+          { kind: 'scene', clips: [{ scene: 'scene.json', shots: ['two'], at: 7 }] },
+          { kind: 'graphics', clips: [{ type: 'text', text: 'Ship faster', at: 1, dur: 3, keys: { opacity: [[0, 0], [1, 1, 'out']], x: 5 } }] },
+          { kind: 'audio', clips: [{ src: 'm.mp3', at: 0, out: 20, fadeOut: 2 }] },
+          { kind: 'captions', clips: [{ at: 1, dur: 1, text: 'far too many words to read in one second' }] },
+          { kind: 'nonsense' },
+        ],
+      };
+      const scenes = { 'scene.json': sceneRaw };
+      const tl = T.normTimeline(raw, { scenes });
+      assert.deepEqual(tl.tracks.map((t) => t.id), ['v1', 's1', 'g1', 'a1', 'cc1']);
+      assert.deepEqual(tl.tracks[0].clips.map((c) => [c.id, c.at, c.dur]), [['c1', 0, 4], ['c2', 3.8, 3]]);
+      assert.equal(tl.tracks[1].clips[0].dur, 3, 'a scene clip lasts as long as its shots');
+      assert.equal(tl.duration, 20);
+      assert.equal(T.sceneTime(tl, tl.tracks[1].clips[0], 1), 3, 'shot two starts 2 s into the scene');
+      // keyframes and eases
+      assert.equal(T.valueAt([[0, 0], [1, 10]], 0.5), 5);
+      assert.equal(T.valueAt([[0, 0, 'hold'], [1, 10]], 0.99), 0);
+      assert.ok(T.valueAt([[0, 0, 'out'], [1, 10]], 0.5) > 8);
+      assert.equal(T.valueAt([[1, 3]], 0), 3);
+      assert.deepEqual(T.normKeyList([[1, 2], ['x', 1], [0, 5, 'in'], [2, 1, 'wobble']]), [[0, 5, 'in'], [1, 2], [2, 1]]);
+      const at4 = T.evalAt(tl, 3.9);
+      assert.deepEqual(at4.layers.map((l) => l.clip.id), ['c1', 'c2', 'c4'], 'the incoming clip draws over the outgoing one');
+      assert.ok(at4.layers[1].state.opacity > 0 && at4.layers[1].state.opacity < 1, 'mid fade');
+      assert.ok(Math.abs(at4.layers[0].srcT - 5.9) < 1e-9);
+      const at15 = T.evalAt(tl, 1.5);
+      assert.equal(at15.layers.find((l) => l.clip.id === 'c4').state.x, 5);
+      assert.ok(Math.abs(at15.audio.find((a) => a.clip.id === 'c5').gain - 1) < 1e-9);
+      assert.ok(Math.abs(T.fadeGain(tl.tracks[3].clips[0], 19) - 0.5) < 1e-9);
+      const solo = T.normTimeline({ ...raw, tracks: raw.tracks.map((t, i) => (i === 2 ? { ...t, solo: true } : t)) }, { scenes });
+      assert.deepEqual(T.evalAt(solo, 1.5).layers.map((l) => l.clip.id), ['c4'], 'solo shows only the soloed track');
+      // the reel and its checks
+      const reel = T.toReel(raw, { scenes, exists: (p) => p !== 'b.mp4' });
+      assert.deepEqual(reel.live, { type: 'timeline', spec: 'timeline.json' });
+      assert.deepEqual(reel.scenes.map((x) => x.id), ['c1', 'c2', 'gap3', 'c3', 'end']);
+      const els = reel.scenes.flatMap((x) => x.els);
+      assert.equal(els.find((e) => e.id === 'c4').props.text.path, 'tracks[2].clips[0].text');
+      const inScene = els.find((e) => e.id === 'c3/ana@two');
+      assert.ok(inScene, 'a scene clip brings its own elements');
+      assert.equal(inScene.props.shirt.file, 'scene.json');
+      assert.deepEqual(inScene.t, [7, 10]);
+      const titles = reel.review.map((x) => x.title);
+      assert.ok(titles.some((x) => /unknown kind/.test(x)));
+      assert.ok(titles.includes('b.mp4 is missing'));
+      assert.ok(titles.includes('Too fast to read'));
+      assert.ok(!titles.some((x) => /covers the end/.test(x)), 'an overlap inside the fade is fine');
+      assert.ok(T.lint({ tracks: [{ kind: 'video', clips: [{ src: 'a.mp4', at: 0, out: 4 }, { src: 'b.mp4', at: 2, out: 4 }] }] }).some((x) => /covers the end/.test(x.title)));
+      assert.ok(T.lint({ tracks: [{ kind: 'video', clips: [{ src: 'a.mp4' }] }] }).some((x) => /has no length/.test(x.title)));
+      assert.equal(normalizeReel(reel).live.type, 'timeline');
+      // patches: only element props
+      assert.equal(T.applyPatches(raw, [{ path: 'tracks[2].clips[0].text', value: 'Hi' }], { scenes }).tracks[2].clips[0].text, 'Hi');
+      assert.throws(() => T.applyPatches(raw, [{ path: 'tracks[0].clips[0].src', value: '/etc/passwd' }], { scenes }), /Can't change/);
+      assert.throws(() => T.applyPatches(raw, [{ path: '__proto__.x', value: 1 }], { scenes }), /Can't change/);
+      // ops: split, trim, slip, key, move, remove with ripple, tracks; the original is never changed
+      const before = JSON.stringify(raw);
+      let e = O.applyOps(raw, { op: 'split', clip: 'c1', t: 1.5 }, { scenes });
+      assert.equal(JSON.stringify(raw), before, 'ops copy');
+      let v = e.tracks[0].clips;
+      assert.deepEqual(v.map((c) => [c.id, c.at, c.in, c.out]), [['c1', 0, 2, 3.5], ['c7', 1.5, 3.5, 6], ['c2', 3.8, undefined, 3]]);
+      assert.ok(v[0].enter && !v[1].enter, 'the right half has no enter fade');
+      e = O.applyOps(e, [{ op: 'trim', clip: 'c7', edge: 'start', t: 2 }, { op: 'trim', clip: 'c2', edge: 'end', t: 99 }], { scenes, srcDur: (src) => (src === 'b.mp4' ? 5 : 10) });
+      v = e.tracks[0].clips;
+      assert.deepEqual([v[1].at, v[1].in, v[1].out], [2, 4, 6]);
+      assert.equal(v[2].out, 5, 'a trim stops at the end of the file');
+      e = O.applyOps(e, { op: 'trim', clip: 'c1', edge: 'start', t: -5 }, { scenes });
+      assert.deepEqual([e.tracks[0].clips[0].at, e.tracks[0].clips[0].in], [0, 2], 'no earlier than 0');
+      e = O.applyOps(e, { op: 'slip', clip: 'c7', by: -10 }, { scenes });
+      assert.deepEqual([e.tracks[0].clips[1].in, e.tracks[0].clips[1].out], [0, 2]);
+      e = O.applyOps(e, [{ op: 'key', clip: 'c4', prop: 'scale', t: 0.5, value: 1.2, ease: 'inOut' }, { op: 'key', clip: 'c4', prop: 'opacity', t: 1, value: 0.5 }], { scenes });
+      assert.deepEqual(e.tracks[2].clips[0].keys.scale, [[0.5, 1.2, 'inOut']]);
+      assert.deepEqual(e.tracks[2].clips[0].keys.opacity, [[0, 0], [1, 0.5]], 'a key at the same time replaces it');
+      e = O.applyOps(e, { op: 'trim', clip: 'c4', edge: 'start', t: 1.5 }, { scenes });
+      assert.deepEqual(e.tracks[2].clips[0].keys.opacity, [[0, 0.25], [0.5, 0.5]], 'keys stay put on the timeline when the start moves');
+      assert.deepEqual([e.tracks[2].clips[0].at, e.tracks[2].clips[0].dur], [1.5, 2.5]);
+      e = O.applyOps(e, [{ op: 'remove', clip: 'c1', ripple: true }], { scenes });
+      assert.deepEqual(e.tracks[0].clips.map((c) => [c.id, c.at]), [['c7', 0.5], ['c2', 2.3]]);
+      assert.throws(() => O.applyOps(e, { op: 'move', clip: 'c4', track: 'v1', at: 0 }, { scenes }), /can't go on/);
+      assert.throws(() => O.applyOps(e, { op: 'split', clip: 'c4', t: 0 }, { scenes }), /inside/);
+      assert.throws(() => O.applyOps(e, { op: 'set', clip: 'c4', key: 'src', value: 1 }, { scenes }), /valid src/);
+      assert.throws(() => O.applyOps(e, { op: 'set', clip: 'c2', key: 'text', value: 'x' }, { scenes }), /Can't set text/);
+      assert.throws(() => O.applyOps(e, { op: 'nope' }), /Unknown edit/);
+      e = O.applyOps(e, [{ op: 'setTrack', track: 'g1', key: 'lock', value: true }]);
+      assert.throws(() => O.applyOps(e, { op: 'set', clip: 'c4', key: 'text', value: 'x' }), /locked/);
+      e = O.applyOps(e, [{ op: 'addTrack', kind: 'graphics', index: 3 }, { op: 'add', track: 'g2', clip: { type: 'text', text: 'New' }, at: 2 }, { op: 'marker', name: 'Hook', t: [0, 3] }]);
+      assert.deepEqual([e.tracks[3].id, e.tracks[3].clips[0].id, e.tracks[3].clips[0].at], ['g2', 'c1', 2], 'new ids are the smallest free ones');
+      assert.deepEqual(T.normTimeline(e, { scenes }).markers.map((m) => m.name), ['Hook']);
+      assert.deepEqual(O.ensureIds({ tracks: [{ kind: 'audio', clips: [{}, { id: 'c1' }] }] }).tracks[0].clips.map((c) => c.id), ['c2', 'c1']);
+
+      // over HTTP
+      const td = mkTmp();
+      fs.writeFileSync(path.join(td, 'timeline.json'), JSON.stringify(raw));
+      fs.writeFileSync(path.join(td, 'scene.json'), JSON.stringify(sceneRaw));
+      fs.writeFileSync(path.join(td, 'a.mp4'), 'x');
+      const tsrv = await startServer({ dir: td, port: 0, open: false, quiet: true, ffmpeg: path.join(td, 'no-ffmpeg-here') });
+      try {
+        const post = { origin: `http://localhost:${tsrv.port}` };
+        const apply = (body) => request(tsrv.port, 'POST', '/api/project-apply', { body: JSON.stringify(body), headers: post });
+        let r = await request(tsrv.port, 'GET', '/api/reel');
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        assert.equal(r.json.timeline, true);
+        assert.equal(r.json.title, 'Launch');
+        assert.ok(r.json.rev);
+        assert.ok(r.json.review.some((x) => x.title === 'b.mp4 is missing') && !r.json.review.some((x) => x.title === 'a.mp4 is missing'));
+        const rev0 = r.json.rev;
+        r = await apply({ file: 'timeline.json', ops: [{ op: 'split', clip: 'c1', t: 1 }] });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        assert.equal(r.json.version, 1, 'an editor save keeps the version');
+        const disk = JSON.parse(fs.readFileSync(path.join(td, 'timeline.json'), 'utf8'));
+        assert.equal(disk.tracks[0].clips.length, 3);
+        assert.equal(disk.tracks[0].clips[0].id, 'c1', 'ids are written into the file');
+        r = await apply({ file: 'timeline.json', base: rev0, ops: [{ op: 'remove', clip: 'c1' }] });
+        assert.equal(r.status, 409, 'an edit on an old copy is refused');
+        assert.ok(r.json.rev);
+        r = await request(tsrv.port, 'GET', '/api/reel');
+        assert.notEqual(r.json.rev, rev0);
+        r = await apply({ file: 'timeline.json', base: r.json.rev, bump: true, patches: [{ path: 'tracks[2].clips[0].text', value: 'Hello' }] });
+        assert.equal(r.json.version, 2, 'Apply starts a new version: ' + JSON.stringify(r.json));
+        r = await apply({ file: 'timeline.json', timeline: raw });
+        assert.equal(r.status, 200, 'undo writes the earlier copy back');
+        assert.equal(JSON.parse(fs.readFileSync(path.join(td, 'timeline.json'), 'utf8')).tracks[0].clips.length, 2);
+        r = await apply({ file: 'timeline.json', ops: [{ op: 'split', clip: 'zzz', t: 1 }] });
+        assert.equal(r.status, 400);
+        assert.match(r.json.error, /no clip "zzz"/);
+        r = await apply({ file: 'timeline.json', timeline: [1, 2] });
+        assert.equal(r.status, 400);
+        r = await apply({ file: 'scene.json', bump: true, patches: [{ path: 'cast.ana.look.shirt', value: '#00ff00' }] });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        const sc2 = JSON.parse(fs.readFileSync(path.join(td, 'scene.json'), 'utf8'));
+        assert.equal(sc2.cast.ana.look.shirt, '#00ff00');
+        assert.equal(sc2.version, 2);
+        r = await apply({ file: 'scene.json', ops: [{ op: 'split' }] });
+        assert.equal(r.status, 400);
+        for (const bad of ['../x.json', 'reel.json', '.motionsnip/state.json', 'a.mp4']) {
+          r = await apply({ file: bad, patches: [] });
+          assert.equal(r.status, 400, `can't edit ${bad}`);
+        }
+        r = await request(tsrv.port, 'POST', '/api/project-apply', { body: JSON.stringify({ file: 'timeline.json', ops: [] }) });
+        assert.equal(r.status, 403, 'Apply needs the player origin');
+        fs.writeFileSync(path.join(td, 'timeline.json'), '{ nope');
+        r = await request(tsrv.port, 'GET', '/api/reel');
+        assert.equal(r.status, 500);
+        assert.match(r.json.error, /timeline.json is not valid JSON/);
+      } finally {
+        await tsrv.close();
+      }
+    }
+
     // With a real ffmpeg that can edit: export trim + cut + colour + blur + a layer, check the result
     const realFf = findFfmpeg(ROOT);
     const canEdit = realFf && (await editEncoder({}, realFf));
@@ -2463,7 +2719,8 @@ async function main() {
     console.error(`Project folder or video not found: ${dir}`);
     process.exit(2);
   }
-  if (!video && !isFile(path.join(dir, 'reel.json')) && isFile(path.join(dir, 'scene.json'))) console.log(`Scene project: drawing ${path.join(dir, 'scene.json')} live.`);
+  if (!video && !isFile(path.join(dir, 'reel.json')) && isFile(path.join(dir, 'timeline.json'))) console.log(`Timeline project: composing ${path.join(dir, 'timeline.json')} live.`);
+  else if (!video && !isFile(path.join(dir, 'reel.json')) && isFile(path.join(dir, 'scene.json'))) console.log(`Scene project: drawing ${path.join(dir, 'scene.json')} live.`);
   else if (!video && !isFile(path.join(dir, 'reel.json'))) {
     const found = pickVideo(dir);
     if (found) console.log(`No reel.json in ${dir}: opening ${found} as a plain video.`);

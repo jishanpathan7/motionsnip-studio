@@ -55,8 +55,8 @@ export function normalizeReel(raw) {
     fps: num(r.fps, 30) || 30,
     duration,
     reference: r.reference || '',
-    // a script that defines window.MotionSnipLive, or { type: 'scene', spec } for a scene project
-    live: typeof r.live === 'string' && r.live ? r.live : r.live && r.live.type === 'scene' ? { type: 'scene', spec: String(r.live.spec || 'scene.json') } : null,
+    // a script that defines window.MotionSnipLive, or { type: 'scene' | 'timeline', spec } drawn by MotionSnip itself
+    live: typeof r.live === 'string' && r.live ? r.live : r.live && (r.live.type === 'scene' || r.live.type === 'timeline') ? { type: r.live.type, spec: String(r.live.spec || `${r.live.type}.json`) } : null,
     export: r.export && typeof r.export === 'object' ? r.export : null,
   };
   const brand = r.brand && typeof r.brand === 'object' ? r.brand : {};
