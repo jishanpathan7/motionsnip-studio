@@ -5,6 +5,24 @@
 // shows the feedback file it would have written instead of saving it.
 (() => {
   const realFetch = window.fetch.bind(window);
+
+  // The player keeps the playhead in the URL hash (#t=…) and rewrites it on every
+  // pause, seek and selection. Page-view counters that hook history (the hackathon
+  // verify script) would count each of those as a visit, so hash-only rewrites go
+  // straight to the browser's own replaceState. Real page loads still count.
+  const nativeReplace = History.prototype.replaceState;
+  const sameButHash = (u) => {
+    try { const n = new URL(u, location.href); return n.origin === location.origin && n.pathname === location.pathname && n.search === location.search; }
+    catch { return false; }
+  };
+  document.addEventListener('DOMContentLoaded', () => {
+    const hooked = history.replaceState;
+    if (hooked === nativeReplace) return;
+    history.replaceState = function (state, title, url) {
+      if (url != null && sameButHash(url)) return nativeReplace.call(history, state, title, url);
+      return hooked.apply(this, arguments);
+    };
+  });
   const STATE_KEY = 'motionsnip:demo:server-state';
   const DEMO_PATH = '~/motionsnip-demo';
   const RESET_KEY = 'motionsnip:demo:reset';
