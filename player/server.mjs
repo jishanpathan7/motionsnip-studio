@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
 import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
-import { toReel as sceneToReel, applyPatches as applyScenePatches } from './app/scene/compile.mjs';
+import { toReel as sceneToReel, applyPatches as applyScenePatches, normScene } from './app/scene/compile.mjs';
 import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline } from './app/comp/timeline.mjs';
 import { applyOps } from './app/comp/ops.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, countPngs } from './lib/frames.mjs';
@@ -41,6 +41,7 @@ const EXPORT_LIMIT = 64 * 1024 * 1024; // an edit export carries its text and lo
 const LAYER_LIMIT = 16 * 1024 * 1024; // one layer PNG
 const MAX_LAYERS = 40;
 const UPLOAD_LIMIT = 100 * 1024 * 1024; // 100 MB
+const VIDEO_LIMIT = 4 * 1024 * 1024 * 1024; // 4 GB, streamed to disk
 const KEEP_TAKES = 6;
 const AUDIO_EXTS = ['mp3', 'wav', 'm4a'];
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp']; // logos and pictures put on a plain video
@@ -168,6 +169,15 @@ export function sniffImage(buf) {
   if (buf[0] === 0x89 && ascii(1, 4) === 'PNG') return 'png';
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
   if (buf.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
+/** Guess a video container from its first bytes: 'iso' (mp4, m4v, mov) | 'webm' | null. */
+export function sniffVideo(buf) {
+  if (!buf || buf.length < 8) return null;
+  const box = buf.subarray(4, 8).toString('latin1');
+  if (['ftyp', 'moov', 'mdat', 'wide', 'free', 'skip'].includes(box)) return 'iso';
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return 'webm';
   return null;
 }
 
@@ -897,7 +907,7 @@ function timelineReel(ctx) {
 
 /**
  * Write the player's edits into timeline.json or a scene file, without Claude.
- * body: { file, base?, bump?, patches?: [{ path, value }], ops?: [...], timeline?: {...} }
+ * body: { file, base?, bump?, patches?: [{ path, value }], ops?: [...] (timeline only), content?: {...} (a whole copy: undo) }
  *   base: the rev the edit was made on; a different file on disk is a 409 (reload, then edit again).
  *   bump: start a new version (Apply); plain editor saves keep the version.
  */
@@ -917,15 +927,21 @@ async function apiProjectApply(ctx, req, res) {
   try {
     if (isTimeline) {
       const scenes = timelineScenes(ctx, cur.raw);
-      if (body.timeline !== undefined) {
-        if (!body.timeline || typeof body.timeline !== 'object' || Array.isArray(body.timeline)) throw new Error('timeline must be a JSON object');
-        normTimeline(body.timeline, { scenes });
-        out = body.timeline;
+      const whole = body.content !== undefined ? body.content : body.timeline;
+      if (whole !== undefined) {
+        if (!whole || typeof whole !== 'object' || Array.isArray(whole)) throw new Error('timeline must be a JSON object');
+        normTimeline(whole, { scenes });
+        out = whole;
       }
       if (Array.isArray(body.ops) && body.ops.length) out = applyOps(out, body.ops, { scenes });
       if (Array.isArray(body.patches) && body.patches.length) out = applyTimelinePatches(out, body.patches, { scenes });
     } else {
-      if (body.ops || body.timeline) throw new Error('Scenes take patches only');
+      if (body.ops || body.timeline) throw new Error('Scenes take patches or content');
+      if (body.content !== undefined) {
+        if (!body.content || typeof body.content !== 'object' || Array.isArray(body.content)) throw new Error('A scene must be a JSON object');
+        normScene(body.content);
+        out = body.content;
+      }
       if (Array.isArray(body.patches) && body.patches.length) out = applyScenePatches(out, body.patches);
     }
   } catch (err) {
@@ -1182,10 +1198,12 @@ async function apiPostState(ctx, req, res) {
 }
 
 async function apiUpload(ctx, req, res, url) {
-  const name = cleanName(url.searchParams.get('name'), [...AUDIO_EXTS, ...IMAGE_EXTS]);
-  if (!name) throw httpError(400, 'Only mp3, wav, m4a, png, jpg or webp files can be uploaded');
-  const type = IMAGE_EXTS.includes(extOf(name)) ? 'image' : 'audio';
-  if (Number(req.headers['content-length']) > UPLOAD_LIMIT) throw httpError(413, 'File is over 100 MB');
+  const name = cleanName(url.searchParams.get('name'), [...AUDIO_EXTS, ...IMAGE_EXTS, ...VIDEO_EXTS]);
+  if (!name) throw httpError(400, 'Only mp3, wav, m4a, png, jpg, webp, mp4, mov or webm files can be uploaded');
+  const type = IMAGE_EXTS.includes(extOf(name)) ? 'image' : VIDEO_EXTS.includes(extOf(name)) ? 'video' : 'audio';
+  const limit = type === 'video' ? VIDEO_LIMIT : UPLOAD_LIMIT;
+  const tooBig = `File is over ${Math.round(limit / 1024 / 1024)} MB`;
+  if (Number(req.headers['content-length']) > limit) throw httpError(413, tooBig);
 
   const assets = path.join(ctx.dir, 'assets');
   await fsp.mkdir(assets, { recursive: true });
@@ -1197,8 +1215,8 @@ async function apiUpload(ctx, req, res, url) {
       let total = 0;
       req.on('data', (c) => {
         total += c.length;
-        if (total > UPLOAD_LIMIT) {
-          reject(httpError(413, 'File is over 100 MB'));
+        if (total > limit) {
+          reject(httpError(413, tooBig));
           req.unpipe(out);
           out.destroy();
           req.resume();
@@ -1217,8 +1235,9 @@ async function apiUpload(ctx, req, res, url) {
     await fd.read(head, 0, 16, 0);
     await fd.close();
     const want = extOf(name) === 'jpeg' ? 'jpg' : extOf(name);
-    const got = type === 'image' ? sniffImage(head) : sniffAudio(head);
-    if (got !== want) throw httpError(415, `This doesn't look like a .${extOf(name)} file`);
+    const got = type === 'image' ? sniffImage(head) : type === 'video' ? sniffVideo(head) : sniffAudio(head);
+    const ok = type === 'video' ? got === (want === 'webm' ? 'webm' : 'iso') : got === want;
+    if (!ok) throw httpError(415, `This doesn't look like a .${extOf(name)} file`);
 
     // Never overwrite: link fails if the name is taken, so try name-2, name-3...
     let final = null;

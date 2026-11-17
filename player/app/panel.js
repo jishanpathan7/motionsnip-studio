@@ -39,6 +39,7 @@ import { pinNote, openNote, editText, openSpot, render as renderOverlay } from '
 import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount } from './feedback.js';
 import { h, icon, fmtTime, round, clamp, projectUrl, toast, copyText, baseName } from './util.js';
 import { on as plainOn, renderPane as renderPlainEdit } from './vedit.js';
+import { inspector as trackInspector, selectedClipId } from './tracks.js';
 import { goToOutput } from './outputs.js';
 
 const TABS = [
@@ -96,8 +97,11 @@ export function initPanel(root) {
   bus.on('check', () => render(true));
   bus.on('pending', () => render(true));
   bus.on('music', () => store.ui.tab === 'sound' && render());
-  bus.on('time', () => {
-    if (store.ui.tab === 'edit' && !store.ui.selected) {
+  // the timeline editor changed a clip, or the playhead moved over the selected one (its keyframe values)
+  bus.on('tracks', () => store.ui.tab === 'edit' && render());
+  bus.on('time', (d) => {
+    if (store.ui.tab === 'edit' && d?.seek && selectedClipId()) return render();
+    if (store.ui.tab === 'edit' && !store.ui.selected && !selectedClipId()) {
       const sc = sceneAt(currentTime());
       if (sc && sc.id !== pn.sceneShown) render();
     }
@@ -211,7 +215,11 @@ function renderEdit() {
   if (plainOn()) return renderPlainEdit();
   const id = store.ui.selected;
   const el = id && getEl(id);
-  if (!el) return renderSceneOverview();
+  if (!el) {
+    // a timeline clip that is not on the frame (a sound, or one just added)
+    const ins = trackInspector(null);
+    return ins ? h('div.edit', h('div.el-head', h('div.el-title', h('h2', 'Clip'))), ins) : renderSceneOverview();
+  }
   const scene = sceneOfEl(el.id);
   const wrap = h('div.edit');
   const onScreen = currentTime() >= el.t[0] && currentTime() <= el.t[1];
@@ -246,6 +254,8 @@ function renderEdit() {
   const keys = Object.keys(el.props);
   if (!keys.length) wrap.append(h('p.muted', 'Nothing to edit here. Right-click the frame (or press C) to leave a note.'));
   for (const k of keys) wrap.append(propField(el, k, el.props[k]));
+  const ins = trackInspector(el);
+  if (ins) wrap.append(ins);
   wrap.append(section('Scene', h('div.scene-line', h('b', `${scene.id} ${scene.name}`), ' ', h('span.mono.muted', `${fmtTime(scene.t[0])}–${fmtTime(scene.t[1])}`)), statusControl(scene)));
   return wrap;
 }

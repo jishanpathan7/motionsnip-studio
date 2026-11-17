@@ -2791,3 +2791,612 @@ kbd {
     grid-template-columns: 1fr;
   }
 }
+
+/* ------------------------------------------------------------ multi-track editor (timeline projects) */
+
+.timeline.has-tracks {
+  display: block;
+}
+.trk-host {
+  position: relative;
+  min-width: 0;
+  user-select: none;
+}
+.trk-host.is-drop {
+  outline: 2px dashed var(--line-strong);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+.trk-host.is-dragging.is-move .trk-clip.is-sel {
+  cursor: grabbing;
+}
+.trk-host.is-trim,
+.trk-host.is-trim * {
+  cursor: ew-resize !important;
+}
+.trk-host.is-slip,
+.trk-host.is-slip * {
+  cursor: col-resize !important;
+}
+.trk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+.trk-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.trk-group + .trk-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+.trk-spacer {
+  flex: 1;
+}
+.trk-body {
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--well);
+}
+.trk-heads {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 6px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  left: 0;
+  z-index: 3;
+}
+.trk-corner {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+.trk-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 8px;
+  min-width: 0;
+}
+.trk-kind {
+  display: flex;
+  color: var(--text-2);
+}
+.trk-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+.trk-hbtns {
+  display: flex;
+  gap: 1px;
+}
+.trk-hbtn {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  opacity: 0.55;
+}
+.trk-hbtn:hover {
+  background: var(--raised);
+  opacity: 1;
+}
+.trk-hbtn.is-on {
+  opacity: 1;
+  color: var(--on-tape);
+  background: var(--tape);
+}
+.trk-scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  touch-action: none;
+}
+.trk-inner {
+  position: relative;
+  padding-bottom: 6px;
+}
+.trk-ruler {
+  position: relative;
+  height: 24px;
+  border-bottom: 1px solid var(--line);
+  cursor: col-resize;
+}
+.trk-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding: 5px 0 0 4px;
+  border-left: 1px solid var(--line-strong);
+  font: 10.5px var(--mono);
+  color: var(--text-2);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.trk-marker {
+  position: absolute;
+  bottom: 0;
+  height: 7px;
+  background: var(--cue);
+  border-radius: 2px 2px 0 0;
+  opacity: 0.8;
+}
+.trk-marker-name {
+  position: absolute;
+  bottom: 8px;
+  left: 0;
+  padding: 0 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--cue);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.trk-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trk-lane {
+  position: relative;
+  background: repeating-linear-gradient(90deg, transparent 0 79px, var(--line) 79px 80px);
+}
+.trk-lane.is-hidden,
+.trk-lane.is-muted.k-audio {
+  opacity: 0.45;
+}
+.trk-lane.is-locked {
+  background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--line) 6px 7px);
+}
+.trk-empty {
+  padding: 14px 12px;
+}
+.trk-clip {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  cursor: grab;
+  min-width: 4px;
+}
+.trk-clip.k-video {
+  background: color-mix(in srgb, #4f86d9 32%, var(--raised));
+}
+.trk-clip.k-scene {
+  background: color-mix(in srgb, #8a63d2 32%, var(--raised));
+}
+.trk-clip.k-graphics {
+  background: color-mix(in srgb, var(--cue) 28%, var(--raised));
+}
+.trk-clip.k-audio {
+  background: color-mix(in srgb, var(--ok) 26%, var(--raised));
+}
+.trk-clip.k-captions {
+  background: color-mix(in srgb, #d9c24f 30%, var(--raised));
+}
+.trk-clip.is-sel {
+  cursor: grabbing;
+}
+.trk-host.is-trim,
+.trk-host.is-trim * {
+  cursor: ew-resize !important;
+}
+.trk-host.is-slip,
+.trk-host.is-slip * {
+  cursor: col-resize !important;
+}
+.trk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+.trk-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.trk-group + .trk-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+.trk-spacer {
+  flex: 1;
+}
+.trk-body {
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--well);
+}
+.trk-heads {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 6px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  left: 0;
+  z-index: 3;
+}
+.trk-corner {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+.trk-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 8px;
+  min-width: 0;
+}
+.trk-kind {
+  display: flex;
+  color: var(--text-2);
+}
+.trk-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+.trk-hbtns {
+  display: flex;
+  gap: 1px;
+}
+.trk-hbtn {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  opacity: 0.55;
+}
+.trk-hbtn:hover {
+  background: var(--raised);
+  opacity: 1;
+}
+.trk-hbtn.is-on {
+  opacity: 1;
+  color: var(--on-tape);
+  background: var(--tape);
+}
+.trk-scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  touch-action: none;
+}
+.trk-inner {
+  position: relative;
+  padding-bottom: 6px;
+}
+.trk-ruler {
+  position: relative;
+  height: 24px;
+  border-bottom: 1px solid var(--line);
+  cursor: col-resize;
+}
+.trk-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding: 5px 0 0 4px;
+  border-left: 1px solid var(--line-strong);
+  font: 10.5px var(--mono);
+  color: var(--text-2);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.trk-marker {
+  position: absolute;
+  bottom: 0;
+  height: 7px;
+  background: var(--cue);
+  border-radius: 2px 2px 0 0;
+  opacity: 0.8;
+}
+.trk-marker-name {
+  position: absolute;
+  bottom: 8px;
+  left: 0;
+  padding: 0 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--cue);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.trk-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trk-lane {
+  position: relative;
+  background: repeating-linear-gradient(90deg, transparent 0 79px, var(--line) 79px 80px);
+}
+.trk-lane.is-hidden,
+.trk-lane.is-muted.k-audio {
+  opacity: 0.45;
+}
+.trk-lane.is-locked {
+  background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--line) 6px 7px);
+}
+.trk-empty {
+  padding: 14px 12px;
+}
+.trk-clip {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  cursor: grab;
+  min-width: 4px;
+}
+.trk-clip.k-video {
+  background: #2c3b52;
+}
+.trk-clip.k-scene {
+  background: #3a2f52;
+}
+.trk-clip.k-graphics {
+  background: #4a3348;
+}
+.trk-clip.k-audio {
+  background: #24403a;
+}
+.trk-clip.k-captions {
+  background: #45422a;
+}
+:root[data-theme='light'] .trk-clip.k-video {
+  background: #d7e3f4;
+}
+:root[data-theme='light'] .trk-clip.k-scene {
+  background: #e3dbf3;
+}
+:root[data-theme='light'] .trk-clip.k-graphics {
+  background: #f3dcec;
+}
+:root[data-theme='light'] .trk-clip.k-audio {
+  background: #d5ece4;
+}
+:root[data-theme='light'] .trk-clip.k-captions {
+  background: #efecd0;
+}
+.trk-clip.is-sel {
+  border-color: var(--tape);
+  box-shadow: 0 0 0 1px var(--tape);
+  z-index: 2;
+}
+.trk-clip.is-bad {
+  border-style: dashed;
+  border-color: var(--bad);
+}
+.trk-media {
+  position: absolute;
+  inset: 1px 0;
+  pointer-events: none;
+}
+.trk-clip-name {
+  position: relative;
+  padding: 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.trk-clip.k-video .trk-clip-name {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+.trk-trans {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  opacity: 0.5;
+}
+.trk-trans.is-in {
+  left: 0;
+  background: linear-gradient(to bottom right, var(--text) 0 50%, transparent 50%);
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+  opacity: 0.25;
+}
+.trk-trans.is-out {
+  right: 0;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+  background: var(--text);
+  opacity: 0.25;
+}
+.trk-key {
+  position: absolute;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  background: var(--tape);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.trk-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  z-index: 1;
+}
+.trk-edge.is-l {
+  left: 0;
+}
+.trk-edge.is-r {
+  right: 0;
+}
+.trk-clip.is-sel .trk-edge {
+  background: color-mix(in srgb, var(--tape) 55%, transparent);
+}
+.trk-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--cue);
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* the clip inspector (panel, Edit tab) */
+.ins-wrap .psec {
+  margin-top: 16px;
+}
+.ins-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.ins-row .input-sm,
+.ins-trans .input-sm,
+.ins-key .input-sm {
+  margin-top: 0;
+}
+.ins-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.ins-num {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ins-num input {
+  width: 72px;
+}
+.ins-trans {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ins-trans > .ins-label {
+  width: 28px;
+}
+.ins-key {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto 84px;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+.ins-key.is-here .ins-label {
+  color: var(--text);
+}
+.ins-diamond {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.ins-diamond:hover:not(:disabled) {
+  background: var(--raised);
+}
+.ins-diamond.is-some {
+  color: var(--text);
+}
+.ins-diamond.is-on {
+  color: var(--on-tape);
+  background: var(--tape);
+}
+.ins-diamond:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.ins-slider {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.ins-slider input {
+  accent-color: var(--text);
+}
+.ins-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  font-size: 12.5px;
+}
+.ins-wrap .ins-check + .ins-check {
+  margin-top: 4px;
+}
+.ins-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 18px;
+}
+.btn-danger {
+  color: var(--bad);
+}

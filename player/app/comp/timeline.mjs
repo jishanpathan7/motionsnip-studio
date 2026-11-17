@@ -514,7 +514,8 @@ export function toReel(raw, { scenes = {}, src = '', exists = null } = {}) {
       return true;
     });
   return {
-    id: `timeline-${tl.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`,
+    // stable across renames: a new id makes the player reload the page and drop what you have open
+    id: typeof raw?.id === 'string' && raw.id.trim() ? raw.id.trim() : 'timeline',
     title: tl.title,
     version: tl.version,
     src,

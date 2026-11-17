@@ -266,9 +266,16 @@ function changed(detail) {
   bus.emit('changes', detail || {});
 }
 
+/**
+ * Direct edits: a timeline project saves prop and box edits into its files at once instead of collecting them
+ * for Claude. Each hook returns true when it took the edit. Set by tracks.js.
+ */
+export const editHooks = { prop: null, box: null };
+
 export function setProp(elId, key, value, at) {
   const el = getEl(elId);
   if (!el || !el.props[key]) return;
+  if (editHooks.prop?.(el, key, value)) return;
   const before = el.props[key].v;
   const ck = `prop:${elId}:${key}`;
   if (sameValue(before, value)) remove(ck);
@@ -286,6 +293,7 @@ export function setBox(elId, box) {
   if (!el || !el.box) return;
   const ck = `box:${elId}`;
   const nb = box.map((v) => Math.round(v * 10) / 10);
+  if (editHooks.box?.(el, nb)) return;
   if (sameBox(el.box, nb, 0.05)) remove(ck);
   else {
     const scale = Math.round(Math.sqrt((nb[2] * nb[3]) / Math.max(1e-6, el.box[2] * el.box[3])) * 100) / 100;

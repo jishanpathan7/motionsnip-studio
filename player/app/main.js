@@ -35,6 +35,7 @@ import {
   reloadLiveTimeline,
 } from './video.js';
 import { initTimeline, loadTimeline } from './timeline.js';
+import { tracksOn } from './tracks.js';
 import { initOverlay, render as renderOverlay, flashCue } from './overlay.js';
 import { initPanel, render as renderPanel, uploadAudio, focusSend } from './panel.js';
 import { startCheck, sendableCount, checkSummary } from './feedback.js';
@@ -443,12 +444,14 @@ function applyRaw(raw) {
 function timelineChanged(raw) {
   setReelRaw(raw);
   if (store.ui.selected && !getEl(store.ui.selected)) select(null);
-  reloadLiveTimeline();
+  if (!tracksOn()) reloadLiveTimeline(); // the timeline editor reloads the compositor itself, after its own saves
   loadTimeline();
   bus.emit('reel', { same: true });
   renderPanel(true);
   renderOverlay(true);
   updateHeader();
+  updateTime(currentTime()); // the length may have changed
+  bus.emit('duration', {});
 }
 
 /** A cutdown finished or Claude listed a new output: take the new list; reload the video if the one on screen changed. */
@@ -707,6 +710,7 @@ async function boot() {
     updateHeader();
   }
   setInterval(poll, 2000);
+  bus.on('refresh', () => poll()); // the timeline editor saved: show the new reel now
 
   // for tests and the curious
   window.__motionsnip = { store, player, seek, duration };
