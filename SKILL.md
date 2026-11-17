@@ -122,6 +122,8 @@ Options: `--port 4321` (moves up if busy), `--no-open` (don't open a browser), `
 
 Tell the user what to do in one or two lines: watch it, click anything to fix it, right-click to circle a problem, then **Send to Claude**.
 
+**A plain video.** If the user wants to review or edit a video file that has no `reel.json` (a screen recording, a phone clip), pass the file itself: `node <skill dir>/player/server.mjs path/to/clip.mp4 &`. Don't write a `reel.json` for it. The player lets them trim, cut, add text, a logo or a blur, and set the colour, and its Export applies those edits itself. Their feedback file then only carries notes pinned on the frame; follow those, and if a note asks for a new cut, export over the same file name so the player counts it as the next version.
+
 ## 6. Apply a feedback file
 
 The user pastes `Apply the MotionSnip Studio feedback in <project>/.motionsnip/feedback-vN.md`. Read that file. It has these parts:

@@ -75,6 +75,22 @@ node ~/.claude/skills/motionsnip-studio/player/server.mjs path/to/project
 
 Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ffmpeg /path/to/ffmpeg`.
 
+## Edit any video
+
+The player also opens a plain video file, with no `reel.json`: a screen recording, a phone clip, a render from any tool.
+
+```bash
+node ~/.claude/skills/motionsnip-studio/player/server.mjs path/to/clip.mp4
+```
+
+Pointing it at a folder without a `reel.json` opens the newest video in it. In the **Edit** tab you can:
+
+- **Trim** the start and end (`I` and `O` at the playhead) and **cut parts out** (`X` at the start of a part, `X` again at its end). The preview plays the edited cut.
+- Put **text**, a **logo** (drop a png, jpg or webp on the page) or a **blur box** on the frame, each for as long as you choose.
+- Set the **colour**: brightness, contrast, saturation, warmth. Hold `\` to compare with the original.
+
+**Export with your edits** re-encodes the video with all of it, plus any music you picked on the **Sound** tab. The original file stays as it is. Notes you pin on the frame still go to Claude with **Send to Claude**. Exporting edits needs an ffmpeg build with the `overlay`, `gblur`, `colorchannelmixer` and `lutrgb` filters; the standard builds have them.
+
 ## Player controls
 
 | Key or action | What it does |
@@ -99,6 +115,10 @@ Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ff
 | Drag the music lane | Change when the music starts |
 | Drag the end of the music lane | Set the fade-out |
 | Drop an audio file on the page | Use it as the music |
+| `I` `O` (plain video) | Trim the start or end at the playhead |
+| `X` … `X` (plain video) | Cut out the part between the two presses |
+| `T` (plain video) | Add text on the frame |
+| Hold `\` (plain video) | See the original, without your edits |
 
 Side panel tabs: **Edit** (the selected element), **Script** (every line of text in time order), **Look** (brand colours, fonts, logo), **Sound** (music, start, fade, levels) and **Changes** (everything you changed, with undo, and the Send button).
 
