@@ -1,6 +1,6 @@
 // Frame exports: the player draws every frame (scenes, graphics, captions) and streams PNGs to the server;
 // ffmpeg reads them from stdin (image2pipe) and encodes the format the user picked. Pure argument builders,
-// so the selftest can check them without running ffmpeg.
+// so the selftest can check them without running ffmpeg. The sound goes in afterwards, in a second quick pass.
 
 /** Output formats. `enc` lists encoders in order of preference; the first one this ffmpeg has wins. */
 export const FORMATS = {
@@ -96,29 +96,44 @@ export function audioMix(clips, first, D) {
 }
 
 /**
- * ffmpeg args for a frame export. Frames arrive on stdin as PNGs, `frames` of them at `fps`.
- * opts: { fps, w, h, frames, out, format, encoder, audio: [clips], gifFps? }
+ * ffmpeg args for a frame export's picture. Frames arrive on stdin, `frames` of them at `fps`: PNGs back to back, or
+ * with opts.raw raw RGBA at w×h (no encoding in the browser, which is what makes an export slow). This pass makes
+ * the picture only: mixing the sound in here too stalls ffmpeg, whose audio runs far ahead of frames that arrive at
+ * drawing speed. buildMuxArgs adds the sound afterwards without re-encoding the picture.
+ * opts: { fps, w, h, frames, out, format, encoder, raw?, gifFps?, gifWidth? }
  */
 export function buildFramesArgs(opts) {
   const { fps, w, h, frames, out, format, encoder } = opts;
   if (!(fps > 0) || !(w > 0) || !(h > 0) || !(frames > 0)) throw new Error('fps, size and frame count are required');
   const D = frames / fps;
-  const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'png', '-i', 'pipe:0'];
+  const input = opts.raw ? ['-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${w}x${h}`, '-framerate', String(fps)] : ['-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'png'];
+  const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', ...input, '-i', 'pipe:0'];
   if (format === 'gif') {
     const gf = Math.min(fps, opts.gifFps || 15);
     const gw = Math.min(w, opts.gifWidth || 960);
     args.push('-filter_complex', `[0:v]fps=${gf},scale=${gw}:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4[v]`, '-map', '[v]', '-loop', '0', '-t', n3(D), out);
     return args;
   }
+  args.push('-vf', `format=rgba,scale=${w}:${h},setsar=1`, ...videoCodecArgs(format, encoder), '-r', String(fps), '-an', '-t', n3(D), out);
+  return args;
+}
+
+/**
+ * ffmpeg args that put the sound under a frame export's picture: the picture is copied, the clips are mixed.
+ * Returns null when there is nothing to add (no clips in range, or a format without sound).
+ * opts: { video, out, format, duration, audio: [{ file, at, in?, out?, gain?, fadeIn?, fadeOut? }] }
+ */
+export function buildMuxArgs(opts) {
+  const { video, out, format, duration: D } = opts;
+  const kind = FORMATS[format]?.audio;
   const clips = (opts.audio || []).filter((c) => c && c.file);
-  for (const c of clips) args.push('-i', c.file);
-  const mix = FORMATS[format]?.audio ? audioMix(clips, 1, D) : null;
-  const parts = [`[0:v]format=rgba,scale=${w}:${h},setsar=1[v]`];
-  if (mix) parts.push(...mix.parts);
-  args.push('-filter_complex', parts.join(';'), '-map', '[v]');
-  if (mix) args.push('-map', mix.out);
-  args.push(...videoCodecArgs(format, encoder), '-r', String(fps));
-  args.push(...(mix ? audioCodecArgs(FORMATS[format].audio) : ['-an']), '-t', n3(D), out);
+  const mix = kind && D > 0 ? audioMix(clips, 1, D) : null;
+  if (!mix) return null;
+  const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', '-i', video];
+  for (const c of clips.filter((c) => Number(c.at) < D)) args.push('-i', c.file);
+  args.push('-filter_complex', mix.parts.join(';'), '-map', '0:v', '-map', mix.out, '-c:v', 'copy', ...audioCodecArgs(kind));
+  if (FORMATS[format].ext === 'mp4' || FORMATS[format].ext === 'mov') args.push('-movflags', '+faststart');
+  args.push('-t', n3(D), out);
   return args;
 }
 

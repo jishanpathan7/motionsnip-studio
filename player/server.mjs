@@ -26,7 +26,7 @@ import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoRefram
 import { toReel as sceneToReel, applyPatches as applyScenePatches, normScene } from './app/scene/compile.mjs';
 import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline, captionCues, toSrt, toVtt } from './app/comp/timeline.mjs';
 import { applyOps } from './app/comp/ops.mjs';
-import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, countPngs } from './lib/frames.mjs';
+import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, buildMuxArgs, countPngs } from './lib/frames.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
 const ROOT = path.dirname(HERE); // the repo / skill folder
@@ -1353,7 +1353,7 @@ async function apiTakes(ctx, res) {
 // --- Frame exports -------------------------------------------------------------
 // The player draws each frame (a scene, graphics, captions) and streams PNGs here; ffmpeg encodes them.
 
-const FRAMES_LIMIT = 64 * 1024 * 1024; // one push: a batch of PNG frames
+const FRAMES_LIMIT = 160 * 1024 * 1024; // one push: a batch of frames (raw 4K RGBA is 33 MB a frame)
 const MAX_FRAMES = 60 * 60 * 20; // 20 minutes at 60 fps
 
 async function formatsFor(ctx, ff) {
@@ -1391,6 +1391,7 @@ async function apiFramesStart(ctx, req, res) {
     ctx.frames.failed = 'Abandoned';
     ctx.frames.child.kill('SIGKILL');
     fs.rmSync(ctx.frames.out, { force: true });
+    fs.rmSync(ctx.frames.picture, { force: true });
     ctx.frames = null;
     setJob(ctx, { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null });
   }
@@ -1420,12 +1421,17 @@ async function apiFramesStart(ctx, req, res) {
   const tag = typeof body.tag === 'string' && /^[\w-]{1,24}$/.test(body.tag) ? `-${body.tag}` : '';
   const out = freePath(exportsDir, `${slug(reel.id)}${tag}-${stamp()}.${FORMATS[format].ext}`);
   const rel = path.relative(ctx.dir, out).split(path.sep).join('/');
-  const args = buildFramesArgs({ fps, w, h, frames, out, format, encoder, audio });
+  const raw = body.pix === 'rgba';
+  // with sound, the frames become a picture-only file first and the sound is added in a second pass (see buildMuxArgs)
+  const withSound = !!buildMuxArgs({ video: out, out, format, duration: frames / fps, audio });
+  const picture = withSound ? out.replace(/(\.\w+)$/, '.picture$1') : out;
+  const args = buildFramesArgs({ fps, w, h, frames, out: picture, format, encoder, raw });
   const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['pipe', 'pipe', 'pipe'] });
   const id = crypto.randomBytes(6).toString('hex');
-  const job = { id, child, total: frames, got: 0, last: Date.now(), out, rel, format, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif', captions: !!body.captions && !!reel.timeline };
+  const job = { id, child, total: frames, got: 0, last: Date.now(), out, picture, audio, duration: frames / fps, rel, format, frameBytes: raw ? w * h * 4 : 0, lastFrame: null, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif', captions: !!body.captions && !!reel.timeline };
   let errText = '';
   child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
+  child.stdout.resume(); // -progress output: unread, its pipe fills and ffmpeg stops mid-export
   child.stdin.on('error', () => {}); // EPIPE when ffmpeg stops early; reported from 'close'
   job.done = new Promise((resolve) => {
     child.on('error', (err) => {
@@ -1453,12 +1459,26 @@ async function apiFramesPush(ctx, req, res, url) {
   const j = framesJob(ctx, url);
   const buf = await readBody(req, FRAMES_LIMIT);
   if (j.failed) throw httpError(500, j.failed);
-  if (!buf.length) return sendJson(res, 200, { got: j.got });
-  if (buf.readUInt32BE(0) !== 0x89504e47) throw httpError(400, 'Frames must be PNG');
-  j.last = Date.now();
-  const ok = j.child.stdin.write(buf);
-  if (!ok) await new Promise((r) => j.child.stdin.once('drain', r));
-  j.got += countPngs(buf);
+  // ?repeat=n: the last frame again n times (a still stretch costs no upload)
+  const repeat = Math.min(Math.max(0, Math.round(num(url.searchParams.get('repeat'), 0))), j.total - j.got);
+  if (repeat) {
+    if (!j.frameBytes || !j.lastFrame) throw httpError(400, 'Nothing to repeat');
+    j.last = Date.now();
+    for (let i = 0; i < repeat; i++) if (!j.child.stdin.write(j.lastFrame)) await new Promise((r) => j.child.stdin.once('drain', r));
+    j.got += repeat;
+  } else {
+    if (!buf.length) return sendJson(res, 200, { got: j.got });
+    if (j.frameBytes) {
+      if (buf.length % j.frameBytes) throw httpError(400, `Raw frames must be ${j.frameBytes} bytes each`);
+    } else if (buf.readUInt32BE(0) !== 0x89504e47) throw httpError(400, 'Frames must be PNG');
+    j.last = Date.now();
+    const ok = j.child.stdin.write(buf);
+    if (!ok) await new Promise((r) => j.child.stdin.once('drain', r));
+    if (j.frameBytes) {
+      j.got += buf.length / j.frameBytes;
+      j.lastFrame = Buffer.from(buf.subarray(buf.length - j.frameBytes));
+    } else j.got += countPngs(buf);
+  }
   setJob(ctx, { pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
   if (j.failed) throw httpError(500, j.failed);
   return sendJson(res, 200, { got: j.got });
@@ -1472,6 +1492,7 @@ async function apiFramesEnd(ctx, req, res, url) {
     j.child.kill('SIGKILL');
     await j.done;
     fs.rmSync(j.out, { force: true });
+    fs.rmSync(j.picture, { force: true });
     ctx.frames = null;
     ctx.child = null;
     setJob(ctx, { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null });
@@ -1480,6 +1501,13 @@ async function apiFramesEnd(ctx, req, res, url) {
   setJob(ctx, { line: 'Encoding…', pct: 98 });
   j.child.stdin.end();
   await j.done;
+  if (!j.failed && j.picture !== j.out) {
+    setJob(ctx, { line: 'Adding sound…', pct: 99 });
+    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    const r = await run(ff.path, buildMuxArgs({ video: j.picture, out: j.out, format: j.format, duration: j.duration, audio: j.audio }), { env: ffmpegEnv(ff) });
+    if (r.code !== 0) j.failed = lastLine(r.stderr) || `ffmpeg exited with code ${r.code}`;
+  }
+  if (j.picture !== j.out) fs.rmSync(j.picture, { force: true });
   ctx.frames = null;
   ctx.child = null;
   if (j.failed) {
@@ -2002,18 +2030,23 @@ async function selftest() {
       const have = encoderSet(' V....D libx264              H.264\n V....D gif                  GIF\n A....D aac                  AAC\n');
       assert.deepEqual(availableFormats(have), { mp4: 'libx264', gif: 'gif' });
       assert.equal(pickEncoder('webm', have), null);
-      const a = buildFramesArgs({ fps: 30, w: 1280, h: 720, frames: 90, out: 'o.mp4', format: 'mp4', encoder: 'libx264', audio: [{ file: 'm.mp3', at: 0.5, in: 2, gain: 0.8, fadeOut: 1 }] });
-      const fc = a[a.indexOf('-filter_complex') + 1];
-      assert.match(fc, /\[0:v\]format=rgba,scale=1280:720,setsar=1\[v\]/);
+      const a = buildFramesArgs({ fps: 30, w: 1280, h: 720, frames: 90, out: 'o.mp4', format: 'mp4', encoder: 'libx264' });
+      assert.equal(a[a.indexOf('-vf') + 1], 'format=rgba,scale=1280:720,setsar=1');
+      assert.ok(a.includes('-an') && a.filter((x) => x === '-i').length === 1, 'the picture pass reads only the frames');
+      assert.deepEqual(a.slice(a.indexOf('image2pipe') - 1, a.indexOf('image2pipe') + 7), ['-f', 'image2pipe', '-framerate', '30', '-c:v', 'png', '-i', 'pipe:0']);
+      const mux = buildMuxArgs({ video: 'p.mp4', out: 'o.mp4', format: 'mp4', duration: 3, audio: [{ file: 'm.mp3', at: 0.5, in: 2, gain: 0.8, fadeOut: 1 }, { file: 'late.mp3', at: 5 }] });
+      const fc = mux[mux.indexOf('-filter_complex') + 1];
       assert.match(fc, /\[1:a\]atrim=start=2:duration=2\.5,.*volume=0\.8,afade=t=out:st=1\.5:d=1,adelay=500:all=1\[a0\]/);
       assert.match(fc, /amix=inputs=1:normalize=0.*atrim=duration=3\[aout\]/);
-      assert.deepEqual(a.slice(a.indexOf('image2pipe') - 1, a.indexOf('image2pipe') + 7), ['-f', 'image2pipe', '-framerate', '30', '-c:v', 'png', '-i', 'pipe:0']);
-      assert.ok(a.includes('aac') && a.at(-1) === 'o.mp4' && a[a.indexOf('-t') + 1] === '3');
-      const silent = buildFramesArgs({ fps: 24, w: 64, h: 36, frames: 24, out: 'o.webm', format: 'webm', encoder: 'libvpx-vp9' });
-      assert.ok(silent.includes('-an') && silent.filter((x) => x === '-map').length === 1 && silent.filter((x) => x === '-i').length === 1);
-      const gif = buildFramesArgs({ fps: 30, w: 1920, h: 1080, frames: 60, out: 'o.gif', format: 'gif', encoder: 'gif', audio: [{ file: 'm.mp3', at: 0 }] });
+      assert.deepEqual(mux.filter((x, i) => mux[i - 1] === '-i'), ['p.mp4', 'm.mp3'], 'clips after the end are not inputs');
+      assert.ok(mux.join(' ').includes('-map 0:v -map [aout] -c:v copy -c:a aac') && mux.at(-1) === 'o.mp4' && mux[mux.indexOf('-t') + 1] === '3');
+      assert.equal(buildMuxArgs({ video: 'p.mp4', out: 'o.mp4', format: 'mp4', duration: 3, audio: [] }), null, 'no clips, no second pass');
+      assert.equal(buildMuxArgs({ video: 'p.gif', out: 'o.gif', format: 'gif', duration: 3, audio: [{ file: 'm.mp3', at: 0 }] }), null, 'a GIF has no sound');
+      const rawArgs = buildFramesArgs({ fps: 30, w: 1280, h: 720, frames: 90, out: 'o.mp4', format: 'mp4', encoder: 'libx264', raw: true });
+      assert.deepEqual(rawArgs.slice(rawArgs.indexOf('rawvideo') - 1, rawArgs.indexOf('rawvideo') + 9), ['-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', '1280x720', '-framerate', '30', '-i', 'pipe:0']);
+      assert.ok(a.at(-1) === 'o.mp4' && a[a.indexOf('-t') + 1] === '3');
+      const gif = buildFramesArgs({ fps: 30, w: 1920, h: 1080, frames: 60, out: 'o.gif', format: 'gif', encoder: 'gif' });
       assert.match(gif.join(' '), /fps=15,scale=960:-2.*palettegen.*paletteuse/);
-      assert.equal(gif.filter((x) => x === '-i').length, 1, 'a GIF has no sound');
       assert.throws(() => buildFramesArgs({ fps: 0, w: 1, h: 1, frames: 1, out: 'x', format: 'mp4', encoder: 'libx264' }));
       assert.equal(audioMix([{ file: 'm.mp3', at: 9 }], 1, 3), null, 'a clip after the end is left out');
       const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.from('IEND'), Buffer.from([0xae, 0x42, 0x60, 0x82])]);
@@ -2694,6 +2727,37 @@ async function selftest() {
         assert.ok(!info.hasAudio);
         r = await request(fs2.port, 'GET', '/api/reel');
         assert.match(r.json.src, /^\/p\/exports\/Frames-.*\.mp4$|exports\/Frames-.*\.mp4/, 'the scene plays its export');
+        // raw RGBA frames, with a still stretch sent as repeats
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 10, pix: 'rgba' });
+        const rj = r.json.job;
+        const rawFrame = (v) => Buffer.alloc(64 * 36 * 4, v);
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&repeat=2`, { body: '', headers: post });
+        assert.equal(r.status, 400, 'nothing to repeat yet');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}`, { body: Buffer.alloc(100), headers: post });
+        assert.equal(r.status, 400, 'raw frames are whole frames');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}`, { body: Buffer.concat([rawFrame(0), rawFrame(80), rawFrame(160)]), headers: post });
+        assert.equal(r.json.got, 3);
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&repeat=99`, { body: '', headers: post });
+        assert.equal(r.json.got, 10, 'repeats stop at the frame count');
+        r = await request(fs2.port, 'POST', `/api/frames-end?job=${rj}`, { body: '{}', headers: post });
+        assert.equal(r.json.state, 'done', r.json.line);
+        const rinfo = await probe(realFf, path.join(fd, r.json.rel));
+        assert.ok(rinfo.w === 64 && Math.abs(rinfo.duration - 1) < 0.15, `raw export ${rinfo.w} ${rinfo.duration}`);
+        // with sound: the picture is made first, then the mix goes under it; frames arriving slowly don't stall it
+        const tone = await run(realFf.path, ['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', path.join(fd, 'tone.m4a')], { env });
+        assert.equal(tone.code, 0, 'make test tone');
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 10, pix: 'rgba', audio: [{ src: 'tone.m4a', at: 0.2, gain: 0.5 }] });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        const sj = r.json.job;
+        for (let i = 0; i < 10; i++) {
+          await request(fs2.port, 'POST', `/api/frames-push?job=${sj}`, { body: rawFrame(i * 20), headers: post });
+          await new Promise((res) => setTimeout(res, 30));
+        }
+        r = await request(fs2.port, 'POST', `/api/frames-end?job=${sj}`, { body: '{}', headers: post });
+        assert.equal(r.json.state, 'done', r.json.line);
+        const sinfo = await probe(realFf, path.join(fd, r.json.rel));
+        assert.ok(sinfo.hasAudio && sinfo.w === 64 && Math.abs(sinfo.duration - 1) < 0.15, `sound export ${sinfo.hasAudio} ${sinfo.duration}`);
+        assert.equal(fs.readdirSync(path.join(fd, 'exports')).filter((f) => f.includes('.picture.')).length, 0, 'the picture-only file is removed');
         // cancel removes the half-made file
         r = await begin({ format: 'gif', fps: 10, w: 64, h: 36, frames: 10 });
         const gj = r.json.job;
