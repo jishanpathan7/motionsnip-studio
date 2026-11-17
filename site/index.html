@@ -15,6 +15,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=DM+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/hero/hero.css">
+<script src="/hero/hero.js" defer></script>
 <style>
 :root{
   --bg:#15121d; --panel:#211c2b; --panel-2:#2a2436; --line:#2f2840; --line-2:#3e3552;
@@ -62,7 +64,13 @@ h1{font-weight:800;font-size:clamp(40px,7vw,78px);line-height:1;letter-spacing:-
 .ctas{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:32px}
 .note{font-size:14px;color:var(--mute);margin-top:14px}
 
-.shot{margin:48px auto 0;border-radius:16px;overflow:hidden;border:1px solid var(--line-2);box-shadow:0 30px 80px -30px rgba(0,0,0,.6);background:var(--panel)}
+.hero-stage{max-width:1000px;margin:36px auto 0;text-align:left}
+.hero-stage:not([data-live]){padding:40px 40px 0}
+.shot{border-radius:16px;overflow:hidden;border:1px solid var(--line-2);box-shadow:0 30px 80px -30px rgba(0,0,0,.6);background:var(--panel)}
+@media (max-width:719px){.hero-stage:not([data-live]){padding:16px 16px 0}}
+/* the stage carries its own gutter: let it replace the page's once the page is narrower than the stage */
+@media (max-width:1047px){.hero-stage{margin-left:-24px;margin-right:-24px}}
+@media (max-width:600px){.hero-stage{margin-left:-16px;margin-right:-16px}}
 .shot .light{display:none}
 @media (prefers-color-scheme: light){.shot .dark{display:none}.shot .light{display:block}}
 
@@ -143,9 +151,11 @@ footer a{color:var(--ink-2)}
         <a class="btn" href="#install">Install for free</a>
       </div>
       <p class="note">Open source. Runs on your computer. No account.</p>
-      <div class="shot">
-        <img class="dark" src="/screenshot-dark.png" width="1600" height="1000" alt="The MotionSnip Studio player: a video frame with a circled note, the timeline below and the Changes panel on the right">
-        <img class="light" src="/screenshot-light.png" width="1600" height="1000" alt="" aria-hidden="true">
+      <div class="hero-stage" id="hero-stage" role="img" aria-label="MotionSnip Studio in use: a headline is fixed in place, the logo is circled with a note, Send to Claude hands both to Claude Code, and version 2 comes back with both changes applied">
+        <div class="shot">
+          <img class="dark" src="/screenshot-dark.png" width="1600" height="1000" alt="">
+          <img class="light" src="/screenshot-light.png" width="1600" height="1000" alt="">
+        </div>
       </div>
     </div>
 

@@ -19,6 +19,8 @@ copy('site/index.html', 'index.html');
 copy('site/og.png', 'og.png');
 copy('docs/screenshot-dark.png', 'screenshot-dark.png');
 copy('docs/screenshot-light.png', 'screenshot-light.png');
+// the animated hero, prebuilt by site/hero/build.mjs
+copy('site/hero/dist', 'hero');
 
 // player app; the local server serves /app/brand/* from docs/brand
 copy('player/app', 'app');
