@@ -16,6 +16,9 @@ const copy = (from, to) => fs.cpSync(rel(from), path.join(OUT, to), { recursive:
 
 // landing page and its images
 copy('site/index.html', 'index.html');
+// the opening keyframe world
+copy('site/world.js', 'world.js');
+copy('site/world.css', 'world.css');
 copy('site/og.png', 'og.png');
 copy('docs/screenshot-dark.png', 'screenshot-dark.png');
 copy('docs/screenshot-light.png', 'screenshot-light.png');

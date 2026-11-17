@@ -14,8 +14,10 @@
 <link rel="icon" type="image/svg+xml" href="/app/brand/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=DM+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=DM+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/world.css">
 <link rel="stylesheet" href="/hero/hero.css">
+<script src="/world.js" defer></script>
 <script src="/hero/hero.js" defer></script>
 <style>
 :root{
@@ -54,16 +56,6 @@ img{max-width:100%;display:block}
 @media (prefers-color-scheme: light){.btn.tape{border-color:#15121d}.btn.tape:hover{background:#dcf53a}}
 .btn:focus-visible,.top nav a:focus-visible,.copy:focus-visible{outline:2px solid var(--cue);outline-offset:3px}
 
-/* hero */
-.hero{padding:56px 0 28px;text-align:center}
-.eyebrow{display:inline-flex;align-items:center;gap:8px;font:500 13px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--mute);margin-bottom:22px}
-.eyebrow i{width:9px;height:9px;border-radius:50%;background:var(--cue);animation:cue 2.4s steps(1,end) infinite}
-@keyframes cue{0%,8%,16%{opacity:1}4%,12%{opacity:.15}}
-h1{font-weight:800;font-size:clamp(40px,7vw,78px);line-height:1;letter-spacing:-.035em;margin:0 auto;max-width:14ch;font-variation-settings:"opsz" 96}
-.lede{font-size:clamp(18px,2.2vw,22px);color:var(--ink-2);max-width:40ch;margin:22px auto 0}
-.ctas{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:32px}
-.note{font-size:14px;color:var(--mute);margin-top:14px}
-
 .hero-stage{max-width:1000px;margin:36px auto 0;text-align:left}
 .hero-stage:not([data-live]){padding:40px 40px 0}
 .shot{border-radius:16px;overflow:hidden;border:1px solid var(--line-2);box-shadow:0 30px 80px -30px rgba(0,0,0,.6);background:var(--panel)}
@@ -76,6 +68,7 @@ h1{font-weight:800;font-size:clamp(40px,7vw,78px);line-height:1;letter-spacing:-
 
 /* sections */
 section{padding:84px 0 0}
+section.first{padding-top:96px}
 .kicker{font:500 13px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--cue);margin:0 0 14px}
 h2{font-weight:800;font-size:clamp(30px,4.4vw,46px);line-height:1.05;letter-spacing:-.03em;margin:0;max-width:20ch}
 .sub{color:var(--ink-2);max-width:58ch;margin:16px 0 0}
@@ -99,11 +92,23 @@ h2{font-weight:800;font-size:clamp(30px,4.4vw,46px);line-height:1.05;letter-spac
 .features h3{font-size:17px;font-weight:700;margin:0 0 6px}
 .features p{margin:0;color:var(--ink-2);font-size:15.5px}
 
-.install{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:36px;margin-top:0}
-.term{background:#0f0d15;color:#f6f4ef;border-radius:12px;border:1px solid #2f2840;font:400 14px/1.6 var(--mono);overflow:hidden}
+.install{display:grid;grid-template-columns:5fr 7fr;gap:48px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:40px}
+.install h2{font-size:clamp(30px,3.4vw,40px);max-width:14ch}
+.install .sub{margin-top:14px}
+.demo-link{display:inline-block;margin-top:20px;color:var(--ink);font-weight:600;text-decoration:underline;text-decoration-color:var(--line-2);text-underline-offset:4px}
+.demo-link:hover{text-decoration-color:var(--cue)}
+.inst-steps{list-style:none;margin:0;padding:0;display:grid;gap:22px;min-width:0}
+.inst-head{display:flex;align-items:center;gap:10px;margin:0 0 10px;font-weight:700;font-size:16px}
+.inst-head .n{flex:none;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font:500 12px/1 var(--mono);background:var(--panel-2);color:var(--ink-2);border:1px solid var(--line)}
+.term{background:#0f0d15;color:#f6f4ef;border-radius:12px;border:1px solid #2f2840;font:400 14px/1.65 var(--mono);overflow:hidden}
 .term .bar{display:flex;justify-content:space-between;align-items:center;padding:8px 10px 8px 14px;border-bottom:1px solid #2f2840;color:#a49db3;font-size:12px}
-.term pre{margin:0;padding:14px;overflow-x:auto;white-space:pre}
-.term .c{color:#a49db3}
+/* wraps instead of clipping; the Copy button always copies the one-line command */
+.term pre{margin:0;padding:14px 16px;white-space:pre-wrap;overflow-wrap:anywhere}
+.term .p{color:#ff4fa8}
+/* one span per command line; continuation lines indent, and wrap under their own indent */
+.term .ln{display:block;padding-left:2ch;text-indent:-2ch}
+.term .ln.in{padding-left:4ch}
+.term .nw{white-space:nowrap}
 .copy{all:unset;cursor:pointer;font:500 12px/1 var(--mono);color:#15121d;background:#e8ff47;border-radius:6px;padding:6px 9px}
 .req{margin:18px 0 0;padding:0;list-style:none;color:var(--ink-2);font-size:15.5px}
 .req li{padding-left:18px;position:relative;margin:6px 0}
@@ -115,49 +120,117 @@ footer a{color:var(--ink-2)}
 @media (max-width:900px){
   .problems,.features{grid-template-columns:1fr 1fr}
   .steps{grid-template-columns:1fr 1fr}
-  .install{grid-template-columns:1fr;padding:24px}
+  .install{grid-template-columns:1fr;gap:32px;padding:28px}
+  .install h2{max-width:20ch}
 }
 @media (max-width:600px){
   .problems,.features,.steps{grid-template-columns:1fr}
-  .hero{padding-top:32px}
   section{padding-top:64px}
   .top nav a.hide-sm{display:none}
+  .install{padding:20px}
+  .term{font-size:12.5px}
 }
-@media (prefers-reduced-motion: reduce){.eyebrow i{animation:none}.btn{transition:none}}
+@media (prefers-reduced-motion: reduce){.btn{transition:none}}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header class="top">
-    <a href="/" aria-label="MotionSnip Studio home">
-      <img class="logo logo-dark" src="/app/brand/logo-dark.svg" alt="MotionSnip Studio" width="200" height="34">
-      <img class="logo logo-light" src="/app/brand/logo-light.svg" alt="MotionSnip Studio" width="200" height="34">
-    </a>
-    <nav>
-      <a class="hide-sm" href="#how">How it works</a>
-      <a class="hide-sm" href="#install">Install</a>
-      <a href="/demo/">Demo</a>
-      <a href="https://github.com/jishanpathan7/motionsnip-studio">GitHub</a>
-    </nav>
-  </header>
+<div class="world" id="world">
+  <div class="pin">
+    <canvas id="world-gl" aria-hidden="true"></canvas>
+    <div class="world-shade" aria-hidden="true"></div>
 
-  <main>
-    <div class="hero">
-      <div class="eyebrow"><i aria-hidden="true"></i>Video review, without the paragraphs</div>
-      <h1>Stop describing video fixes in&nbsp;words.</h1>
-      <p class="lede">Point at the exact moment and spot, fix the text in place, and get back the version you meant.</p>
-      <div class="ctas">
-        <a class="btn tape" href="/demo/">Try the live demo</a>
-        <a class="btn" href="#install">Install for free</a>
+    <header class="top">
+      <a href="/" aria-label="MotionSnip Studio home">
+        <img class="logo logo-dark" src="/app/brand/logo-dark.svg" alt="MotionSnip Studio" width="200" height="34">
+        <img class="logo logo-light" src="/app/brand/logo-light.svg" alt="" width="200" height="34">
+      </a>
+      <nav>
+        <a class="hide-sm" href="#how">How it works</a>
+        <a class="hide-sm" href="#install">Install</a>
+        <a href="/demo/">Demo</a>
+        <a href="https://github.com/jishanpathan7/motionsnip-studio">GitHub</a>
+      </nav>
+    </header>
+
+    <div class="intro">
+      <p class="eyebrow"><i aria-hidden="true"></i>Video review, without the paragraphs</p>
+      <h1>Stop describing video fixes in&nbsp;<em>words.</em></h1>
+      <div class="intro-row">
+        <p class="lede">Point at the exact moment and spot, fix the text in place, and get back the version you meant.</p>
+        <div>
+          <div class="ctas">
+            <a class="btn tape" href="/demo/">Try the live demo</a>
+            <a class="btn" href="#install">Install for free</a>
+          </div>
+          <p class="note">Open source. Runs on your computer. No account.</p>
+        </div>
       </div>
-      <p class="note">Open source. Runs on your computer. No account.</p>
+    </div>
+
+    <div class="chapters">
+      <article class="chap">
+        <p class="chap-n">01 <b>· Point</b></p>
+        <h2>Circle the exact spot.</h2>
+        <p>Pause on the frame, draw a ring around what’s wrong and type the note. It keeps its time and its place on screen.</p>
+      </article>
+      <article class="chap">
+        <p class="chap-n">02 <b>· Fix</b></p>
+        <h2>Fix the words in place.</h2>
+        <p>Double-click a headline and retype it. Claude gets the exact before and after, so nothing is open to guessing.</p>
+      </article>
+      <article class="chap">
+        <p class="chap-n">03 <b>· Send</b></p>
+        <h2>Send to Claude. Get&nbsp;v2.</h2>
+        <p>Claude reads every note, changes the code and renders the next version. Each change gets ticked off, and <kbd>V</kbd> flips back to v1 at the same frame.</p>
+      </article>
+    </div>
+
+    <figure class="clip is-v2 is-tick1 is-tick2 is-has1 is-has2" aria-hidden="true">
+      <div class="clip-bar"><span class="ver clip-status">v2</span><span class="name">Acme launch</span><span>00:02.4</span><span class="send">Send to Claude</span></div>
+      <div class="clip-frame">
+        <div class="clip-logo"><i></i>acme</div>
+        <svg class="clip-ring" viewBox="0 0 100 60" preserveAspectRatio="none"><path pathLength="1" d="M52 4C24 2 4 12 5 31c1 20 26 27 50 25 26-2 42-12 40-28C93 11 72 3 44 6"/></svg>
+        <div class="clip-note"><small>Note · 00:02.4</small>Make the logo bigger</div>
+        <div class="clip-head"><span class="clip-tag">Headline</span><span class="clip-tape">was “Meet Acme”</span><span class="clip-head-text">Say hi to Acme</span></div>
+        <div class="clip-bars"><i></i><i></i></div>
+        <div class="clip-product"></div>
+        <span class="clip-cue"></span>
+      </div>
+      <ul class="clip-changes">
+        <li class="clip-count">v2 · 2 of 2 applied</li>
+        <li class="r r1"><span class="lead ring"></span><span><b>Logo</b> · Make the logo bigger</span><span class="k"><svg viewBox="0 0 10 10"><path d="M2 5.2 4.2 7.4 8 3"/></svg></span></li>
+        <li class="r r2"><span class="lead tape"></span><span><b>Headline</b> · Meet Acme → Say hi to Acme</span><span class="k"><svg viewBox="0 0 10 10"><path d="M2 5.2 4.2 7.4 8 3"/></svg></span></li>
+      </ul>
+    </figure>
+
+    <div class="hud" aria-label="Scroll position">
+      <span class="tc" id="tc" aria-hidden="true">00:00:00:00</span>
+      <div class="scrub" role="group" aria-label="Jump to a chapter">
+        <span class="scrub-fill"></span>
+        <button type="button" style="left:0%"><i></i><span>Intro</span></button>
+        <button type="button" style="left:24%"><i></i><span>Point</span></button>
+        <button type="button" style="left:48%"><i></i><span>Fix</span></button>
+        <button type="button" style="left:72%"><i></i><span>Send</span></button>
+        <span class="scrub-head"></span>
+      </div>
+      <span class="hint">Scroll to scrub <i></i></span>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <main>
+    <section class="first" aria-labelledby="player-h">
+      <p class="kicker">In the player</p>
+      <h2 id="player-h">One round, start to finish.</h2>
+      <p class="sub">This is the real player, simplified. Everything happens on your computer, next to Claude Code.</p>
       <div class="hero-stage" id="hero-stage" role="img" aria-label="MotionSnip Studio in use: a headline is fixed in place, the logo is circled with a note, Send to Claude hands both to Claude Code, and version 2 comes back with both changes applied">
         <div class="shot">
           <img class="dark" src="/screenshot-dark.png" width="1600" height="1000" alt="">
           <img class="light" src="/screenshot-light.png" width="1600" height="1000" alt="">
         </div>
       </div>
-    </div>
+    </section>
 
     <section aria-labelledby="problem">
       <p class="kicker">The problem</p>
@@ -222,24 +295,33 @@ footer a{color:var(--ink-2)}
 
     <section id="install" aria-labelledby="inst">
       <div class="install">
-        <div>
+        <div class="install-copy">
           <p class="kicker">Install</p>
-          <h2 id="inst">One command. Then ask Claude for a video.</h2>
+          <h2 id="inst">Install it, then ask Claude for a video.</h2>
+          <p class="sub">MotionSnip Studio is a skill for Claude Code. One clone sets it up.</p>
           <ul class="req">
-            <li>Works as a skill for Claude Code</li>
-            <li>Needs Node 18 or newer; export also needs ffmpeg</li>
+            <li>Node 18 or newer</li>
+            <li>ffmpeg, only for exporting the final mp4</li>
             <li>Everything stays on your computer</li>
           </ul>
+          <a class="demo-link" href="/demo/">Want to see it first? Try the live&nbsp;demo&nbsp;<span aria-hidden="true">→</span></a>
         </div>
-        <div class="term">
-          <div class="bar"><span>Terminal</span><button class="copy" type="button" data-copy="git clone https://github.com/jishanpathan7/motionsnip-studio.git ~/.claude/skills/motionsnip-studio">Copy</button></div>
-          <pre><span class="c"># install the skill</span>
-git clone https://github.com/jishanpathan7/motionsnip-studio.git \
-  ~/.claude/skills/motionsnip-studio
-
-<span class="c"># then, in Claude Code</span>
-Make a 30 second launch video for Acme.</pre>
-        </div>
+        <ol class="inst-steps">
+          <li>
+            <p class="inst-head"><span class="n">1</span>Install the skill</p>
+            <div class="term">
+              <div class="bar"><span>Terminal</span><button class="copy" type="button" aria-label="Copy the install command" data-copy="git clone https://github.com/jishanpathan7/motionsnip-studio.git ~/.claude/skills/motionsnip-studio">Copy</button></div>
+              <pre><span class="ln">git clone \</span><span class="ln in">https://github.com/<wbr>jishanpathan7/<wbr><span class="nw">motionsnip-studio.git \</span></span><span class="ln in">~/.claude/<wbr>skills/<wbr><span class="nw">motionsnip-studio</span></span></pre>
+            </div>
+          </li>
+          <li>
+            <p class="inst-head"><span class="n">2</span>Restart Claude Code, then ask</p>
+            <div class="term">
+              <div class="bar"><span>Claude Code</span><button class="copy" type="button" aria-label="Copy the example prompt" data-copy="Make a 30 second launch video for Acme.">Copy</button></div>
+              <pre><span class="ln"><span class="p" aria-hidden="true">❯ </span>Make a 30 second launch video for Acme.</span></pre>
+            </div>
+          </li>
+        </ol>
       </div>
     </section>
   </main>

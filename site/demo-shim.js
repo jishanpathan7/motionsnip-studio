@@ -63,18 +63,19 @@
       }
       case 'POST upload': {
         const name = url.searchParams.get('name') || 'music.mp3';
-        if (!/\.(mp3|wav|m4a)$/i.test(name)) return json(400, { error: 'Only mp3, wav or m4a files can be uploaded' });
+        const image = /\.(png|jpe?g|webp)$/i.test(name);
+        if (!image && !/\.(mp3|wav|m4a)$/i.test(name)) return json(400, { error: 'Only mp3, wav, m4a, png, jpg or webp files can be uploaded' });
         const blob = init && init.body instanceof Blob ? init.body : null;
         if (!blob) return json(400, { error: 'The file is empty' });
         // a blob URL plays in this tab; it won't survive a reload, which is fine for a demo
-        return json(200, { id: URL.createObjectURL(blob), name, type: 'audio' });
+        return json(200, { id: URL.createObjectURL(blob), name, type: image ? 'image' : 'audio' });
       }
       case 'GET takes':
         return json(200, []);
       case 'GET export':
         return json(200, null);
       case 'GET ffmpeg':
-        return json(200, { ok: false, path: null });
+        return json(200, { ok: false, path: null, edits: false });
       case 'POST export':
         return json(400, { error: 'Export runs on your own computer. Install MotionSnip Studio to export an mp4.' });
       case 'POST reveal':
