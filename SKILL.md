@@ -300,4 +300,58 @@ When the user describes a scene in words ("a dev stuck on a slow render, a robot
 
 **Plain words to fields:** "slower" is a higher `dur` or a shot `tempo` below 1; "more bounce" is `"ease": "back"` or `"spring"`; "brand colours" is `style.palette`; "make it chalky / cleaner" is `style.preset` or `wobble`; "add a dog" is a new prop (`draw` path) placed in a shot; "she should notice the chart" is a `look` or `point` beat before the line.
 
-Don't draw real people, logos or characters you don't have rights to. Export to video comes in a later version; for now the scene plays live in the player.
+Don't draw real people, logos or characters you don't have rights to.
+
+The user can export a scene to MP4, HEVC, ProRes, WebM or GIF from the player's **Export** button (it draws every frame; no render step for you). When they change words or colours in the player they can **Apply** them into `scene.json` themselves as the next version, without you; only notes and moved things come to you.
+
+## 11. Timeline projects: footage, scenes, titles, music and captions together
+
+When the video mixes things (the user's footage, a scene or two, titles and lower thirds, music, captions) or the user asks for a whole video from a brief or a script, make a **timeline project**: a folder with `timeline.json` (and the `scene.json` files its scene clips use) and no `reel.json`. MotionSnip Studio composes it live, gives the user a multi-track editor (move, trim, split, keyframes, transitions, their own media) and exports it with sound. The user's hand edits are saved straight into `timeline.json`, so **read the file fresh before every change and keep what they did**.
+
+**Idea to video:**
+
+1. Turn the brief into beats: a hook (first 2 to 3 s), the story, a payoff, an end card. Pick a length (15 to 30 s for social, 45 to 90 s for an explainer).
+2. One marker per beat. Under the markers: footage on video tracks, illustrated parts as scene clips (write their `scene.json` as in section 10), titles on a graphics track, music on an audio track, captions on a captions track.
+3. Open the player on the folder: `node "<skill dir>/player/server.mjs" "<folder>"`. Scrub every beat and read the rings (gaps, overlapping clips, missing files, captions too fast to read, text too small or off the frame) and fix them before you show it.
+4. A feedback file with a `## New request` section is the user describing something new in the Changes tab: build it into the same `timeline.json`.
+
+**The format:**
+
+```jsonc
+{
+  "title": "Launch teaser", "version": 1,
+  "size": [1920, 1080], "fps": 30, "bg": "#0c0c10",
+  "tracks": [                                              // later tracks draw on top
+    { "id": "v1", "kind": "video", "name": "Footage", "clips": [
+      { "id": "intro", "src": "assets/demo.mp4", "at": 0, "in": 2, "out": 8,     // timeline seconds; source seconds
+        "gain": 0.6, "fit": "cover", "look": { "contrast": 0.1, "saturation": 0.2, "warmth": 0, "brightness": 0 },
+        "keys": { "scale": [[0, 1], [6, 1.08, "inOut"]] },                      // a slow push-in
+        "exit": { "kind": "fade", "dur": 0.5 } } ] },
+    { "id": "s1", "kind": "scene", "name": "Story", "clips": [
+      { "id": "story", "scene": "scene.json", "shots": ["stuck", "help"], "at": 5.5, "enter": { "kind": "wipe", "dur": 0.4 } } ] },
+    { "id": "g1", "kind": "graphics", "name": "Titles", "clips": [
+      { "id": "title", "type": "text", "text": "Ship it today", "at": 0.6, "dur": 3, "preset": "pop",
+        "box": [10, 38, 80, 24], "style": { "size": 8, "color": "#ffffff", "weight": 800, "bg": null, "align": "center" } },
+      { "id": "bar", "type": "shape", "shape": "rect", "at": 2.4, "dur": 3, "box": [6, 76, 30, 9], "fill": "#ff4fa3", "radius": 20 },
+      { "id": "logo", "type": "image", "src": "assets/logo.png", "at": 12, "dur": 3, "box": [40, 40, 20, 20], "fit": "contain" },
+      { "id": "hide", "type": "blur", "at": 1, "dur": 4, "box": [70, 5, 25, 10], "amount": 12 } ] },
+    { "id": "a1", "kind": "audio", "name": "Music", "role": "music", "clips": [
+      { "id": "music", "src": "assets/track.mp3", "at": 0, "in": 0, "out": 15, "gain": 0.8, "fadeIn": 1, "fadeOut": 2 } ] },
+    { "id": "cc1", "kind": "captions", "name": "Captions", "clips": [
+      { "id": "cap1", "at": 6.2, "dur": 2.2, "text": "Tell Claude the idea." } ] }
+  ],
+  "markers": [ { "id": "hook", "name": "Hook", "t": [0, 5.5] }, { "id": "story", "name": "Story", "t": [5.5, 15] } ]
+}
+```
+
+- `at` is where a clip starts on the timeline. Video, audio and scene clips play their source from `in` to `out` (a scene clip's length comes from its shots); graphics and captions have `dur`.
+- `box` is `[x, y, w, h]` in % of the frame. Text `style.size` is % of the frame height (4 is a lower third, 8 a title); leave room for the text to wrap.
+- `keys` animate `x`, `y` (a shift in % of the frame), `scale`, `rotate` (degrees) and `opacity`: `[[t, value, ease?], ...]` with `t` in seconds from the clip's start and ease `linear`, `in`, `out`, `inOut` or `hold`.
+- `enter` and `exit` transitions: `fade`, `wipe`, `slide`, `zoom`, each with `dur`. Text `preset`: `none`, `fade`, `pop`, `slide-up`, `type-on`, `word-stagger`. Fonts: `Bricolage Grotesque`, `DM Mono`, `Patrick Hand`, `system-ui`.
+- Tracks take `mute`, `solo`, `hide`, `lock` and `gain`. The user locks a track to keep it as it is: don't change clips on a locked track.
+- Ids: tracks `v1`, `s1`, `g1`, `a1`, `cc1`; clips any short unique id. Keep them stable: notes, rings and the user's selection follow them. Notes and feedback name paths like `timeline.json › tracks[2].clips[0].text`.
+- Media files live in the project (`assets/`). Use only footage, music and images the user gave you or has rights to.
+
+**Plain words to fields:** "tighter" is shorter clips and less space between them; "punchier titles" is `pop` or `word-stagger`, a heavier `weight`, a bigger `size`; "a slow zoom" is `scale` keys from 1 to 1.05–1.1; "softer cut" is an `enter`/`exit` fade of 0.3–0.6 s; "music too loud under the voice" is a lower music `gain`; "subtitles" are a captions track, one short line per clip, at least about 1 s per 3 words.
+
+The user exports from the player (MP4, HEVC, ProRes, WebM, GIF; 720p to 4K; captions drawn in or saved as `.srt` and `.vtt`), and makes 9:16, 1:1 and bumper versions from the export with **Cutdown**. Bump `version` in `timeline.json` when you finish a round, as with any project.

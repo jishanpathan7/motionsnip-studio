@@ -2786,6 +2786,18 @@ kbd {
   display: grid;
   gap: 4px;
 }
+.export-checks {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+.export-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
 @media (max-width: 520px) {
   .export-form {
     grid-template-columns: 1fr;
@@ -3399,4 +3411,23 @@ kbd {
 }
 .btn-danger {
   color: var(--bad);
+}
+
+/* Changes tab: ask for something new, apply a scene's edits */
+.describe-input {
+  width: 100%;
+  min-height: 64px;
+}
+.describe-help {
+  margin: 6px 0 0;
+}
+.apply-now {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--well);
+}
+.apply-now p {
+  margin: 8px 0 0;
 }

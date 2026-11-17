@@ -310,6 +310,28 @@ export function setAudio(field, value) {
   changed({ key: ck, audio: true });
 }
 
+/** The Describe box: a new request for Claude, in words. One unsent request at a time; a sent one stays for Check. */
+export function setRequest(text) {
+  const t = String(text || '');
+  const cur = store.data.changes.find((c) => c.kind === 'request' && !c.sent);
+  if (!t.trim()) {
+    if (cur) remove(cur.key);
+  } else if (cur) {
+    cur.text = t;
+    cur.updatedAt = Date.now();
+  } else store.data.changes.push({ kind: 'request', key: `request:${Date.now()}`, id: newId(), text: t, createdAt: Date.now(), updatedAt: Date.now(), sent: null });
+  changed({ key: 'request', request: true });
+}
+
+/** The unsent request's words, or ''. */
+export const requestText = () => store.data.changes.find((c) => c.kind === 'request' && !c.sent)?.text || '';
+
+/** Drop changes by key without the undo side effects (they were applied to the files). */
+export function dropChanges(keys) {
+  for (const k of keys) remove(k);
+  changed({ applied: true });
+}
+
 export function setBrandColor(id, v) {
   const c = store.reel.brand.colors.find((x) => x.id === id);
   if (!c) return;

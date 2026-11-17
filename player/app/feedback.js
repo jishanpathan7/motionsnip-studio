@@ -13,6 +13,7 @@ import {
   sceneAt,
   unsentChanges,
   dismissedFindings,
+  dropChanges,
 } from './state.js';
 import { api, copyText, fmtTime, round, sameValue, sameBox, toast } from './util.js';
 import { hasEdits as plainEdits, summary as plainSummary } from './vedit.js';
@@ -158,6 +159,9 @@ export function describe(c) {
       detail: `${fmtTime(c.t)}${el ? ' · ' + el.label : ''}${c.review ? ' · spotted by Claude' : ''}`,
     };
   }
+  if (c.kind === 'request') {
+    return { section: 'request', at: null, line: c.text.trim(), short: 'Request', detail: short(c.text.trim().replace(/\s+/g, ' ')) };
+  }
   return { section: 'other', at: null, line: `- ${c.kind}`, short: c.kind, detail: '' };
 }
 
@@ -176,11 +180,25 @@ export function buildMarkdown(list = store.data.changes) {
   out.push(`MotionSnip Studio feedback for "${reel.title}" v${reel.version}`);
   if (reel.plain) out.push(`Video: ${reel.file || reel.src} (a plain video file, no reel.json) · ${reel.w}x${reel.h} · ${round(reel.duration, 2)}s`);
   else out.push(`Project: ${reel.path || '(unknown path)'} · ${reel.w}x${reel.h} · ${reel.fps} fps · ${round(reel.duration, 2)}s`);
+  if (reel.timeline)
+    out.push(
+      'This is a MotionSnip timeline: change timeline.json, and the scene files its scene clips use (there is no reel.json; MotionSnip Studio builds the reel from them). The reviewer edits the same files by hand in MotionSnip Studio, and those edits are already saved in them: keep them unless a note says otherwise. Keep track and clip ids stable. Paths below like tracks[2].clips[0] point into timeline.json.',
+    );
   if (reel.scene) out.push('This is a MotionSnip scene: change scene.json (there is no reel.json; MotionSnip Studio builds the reel from the scene). Moved boxes mean: move that thing in that shot (its "place", or the "to" of the beat that moves it). Keep ids stable.');
   if (reel.reference) out.push(`Reference: ${reel.reference}`);
 
   const ds = list.map((c) => ({ c, d: describe(c) }));
   const by = (sec) => ds.filter((x) => x.d.section === sec);
+  const asks = by('request');
+  if (asks.length) {
+    out.push('', '## New request');
+    out.push(
+      reel.timeline
+        ? 'The reviewer asks for this in their own words. Build it into timeline.json (new tracks and clips, scene clips with their scene files, graphics, captions, music), following the "Timeline projects" section of the MotionSnip skill.'
+        : 'The reviewer asks for this in their own words.',
+    );
+    for (const x of asks) out.push('', x.d.line);
+  }
   const edits = by('edits').sort((a, b) => (a.d.at ?? -1) - (b.d.at ?? -1));
   if (edits.length) {
     out.push('', '## Exact changes');
@@ -239,7 +257,7 @@ export function buildMarkdown(list = store.data.changes) {
       out.push('', `The reviewer is also editing this video in MotionSnip Studio (${plainSummary()}). Leave those to them: MotionSnip Studio applies them itself when it exports. Times above are in the original video.`);
     }
     out.push('', `Next version: this is a plain video file, not a MotionSnip project. Make the changes and export the new cut over the same file (${reel.src}); MotionSnip Studio counts that as v${reel.version + 1}.`);
-  } else out.push('', `Next version: set "version" to ${reel.version + 1} in ${reel.scene ? 'scene.json' : 'reel.json'}.`);
+  } else out.push('', `Next version: set "version" to ${reel.version + 1} in ${reel.timeline ? 'timeline.json' : reel.scene ? 'scene.json' : 'reel.json'}.`);
   return out.join('\n') + '\n';
 }
 
@@ -259,6 +277,47 @@ export function promptLine(path) {
 
 export function sendableCount() {
   return unsentChanges().length + store.data.notQuite.length;
+}
+
+/**
+ * A scene project's edits that can go straight into scene.json without Claude: element props with a path and
+ * scene colours. Returns { patches, keys }.
+ */
+export function sceneApplicable() {
+  const reel = store.master;
+  if (!reel?.scene || store.reel?.derived) return { patches: [], keys: [] };
+  const patches = [];
+  const keys = [];
+  for (const c of unsentChanges()) {
+    if (c.kind === 'prop') {
+      const p = getEl(c.elId)?.props[c.propKey];
+      if (p?.path) {
+        patches.push({ path: p.path, value: c.after });
+        keys.push(c.key);
+      }
+    } else if (c.kind === 'brand' && reel.brand.colors.some((x) => x.id === c.colorId)) {
+      patches.push({ path: `style.palette.${c.colorId}`, value: c.after });
+      keys.push(c.key);
+    }
+  }
+  return { patches, keys };
+}
+
+/** Write those edits into scene.json as the next version. Notes and moved boxes still go to Claude. */
+export async function applySceneNow() {
+  const { patches, keys } = sceneApplicable();
+  if (!patches.length) return false;
+  const file = store.master.live?.spec || 'scene.json';
+  try {
+    const r = await api('/api/project-apply', { json: { file, patches, bump: true } });
+    dropChanges(keys);
+    toast(`Applied ${keys.length} edit${keys.length === 1 ? '' : 's'} to ${file} as v${r.version}.`);
+    bus.emit('refresh', {});
+    return true;
+  } catch (e) {
+    toast(`Couldn't apply: ${e.message}`, { kind: 'error', ms: 6000 });
+    return false;
+  }
 }
 
 /** Send to Claude: write the feedback file, copy the prompt, mark changes as sent. */

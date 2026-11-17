@@ -103,7 +103,7 @@ export async function exportFrames(draw, opts) {
     if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), { status: r.status });
     return data;
   };
-  const start = await post('/api/frames-start', JSON.stringify({ w: opts.w, h: opts.h, fps: opts.fps, frames: opts.frames, format: opts.format, audio: opts.audio || [], tag: opts.tag, setSrc: opts.setSrc }));
+  const start = await post('/api/frames-start', JSON.stringify({ w: opts.w, h: opts.h, fps: opts.fps, frames: opts.frames, format: opts.format, audio: opts.audio || [], tag: opts.tag, setSrc: opts.setSrc, captions: !!opts.captions }));
   const job = start.job;
   const raster = createRaster(start.w, start.h);
   const batch = [];

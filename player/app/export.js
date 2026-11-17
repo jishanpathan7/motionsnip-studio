@@ -6,7 +6,7 @@ import { hasEdits, summary as editSummary, exportEdit } from './vedit.js';
 import { player } from './video.js';
 import { exportFrames } from './comp/raster.js';
 
-const ex = { dlg: null, body: null, job: null, poll: 0, btn: null, mode: 'mix', ffmpeg: null, formats: null, opt: { format: 'mp4', size: 'native', fps: 0 }, abort: null };
+const ex = { dlg: null, body: null, job: null, poll: 0, btn: null, mode: 'mix', ffmpeg: null, formats: null, opt: { format: 'mp4', size: 'native', fps: 0, burn: true, sidecar: true }, abort: null };
 
 // a project the player draws itself (a scene, a timeline): export by drawing every frame
 const drawsItself = () => !!(store.reel && !store.reel.derived && player.live && (typeof player.live.renderFrame === 'function' || typeof player.live.frameAt === 'function'));
@@ -113,7 +113,29 @@ function framesForm(running) {
     sel('Format', 'format', fmts.map((f) => [f.id, f.ok ? f.label : `${f.label} (this ffmpeg can't)`, !f.ok])),
     sel('Size', 'size', sizes().map((x) => [x.id, x.label])),
     sel('Frame rate', 'fps', [24, 25, 30, 60].map((v) => [v, `${v} fps`])),
+    hasCaptions() ? captionChecks(running) : null,
   );
+}
+
+/** A timeline with captions: whether they're drawn into the picture, and whether they're saved as files too. */
+const hasCaptions = () => !!player.live?.timeline?.tracks?.some((t) => t.kind === 'captions' && !t.hide && t.clips.some((c) => c.text));
+
+function captionChecks(running) {
+  const check = (key, label) =>
+    h(
+      'label.export-check',
+      h('input', {
+        type: 'checkbox',
+        checked: !!ex.opt[key],
+        disabled: running,
+        onchange: (e) => {
+          ex.opt[key] = e.target.checked;
+          render();
+        },
+      }),
+      label,
+    );
+  return h('div.export-checks', check('burn', 'Draw the captions into the video'), check('sidecar', 'Also save them as .srt and .vtt files'));
 }
 
 function render() {
@@ -288,6 +310,11 @@ async function startFrames() {
     const off = Number(a.musicOffset) || 0;
     audio.push({ src: a.music, at: Math.max(0, off), in: Math.max(0, -off), gain: a.musicVol, fadeOut: a.musicFade || 0 });
   }
+  // captions left out of the picture: draw the export from a copy with the caption tracks hidden
+  const caps = hasCaptions();
+  const shown = live.raw;
+  const hidden = caps && !ex.opt.burn && shown ? { ...shown, tracks: shown.tracks.map((t) => (t?.kind === 'captions' ? { ...t, hide: true } : t)) } : null;
+  if (hidden) live.load(hidden);
   ex.abort = new AbortController();
   ex.job = { state: 'running', pct: 0, line: 'Starting…' };
   render();
@@ -306,7 +333,9 @@ async function startFrames() {
         frames,
         format: ex.opt.format,
         audio,
-        setSrc: ex.opt.format !== 'gif' && size.id === 'native' && fps === reel.fps,
+        // the video becomes the project's src only when it shows everything the project shows
+        setSrc: ex.opt.format !== 'gif' && size.id === 'native' && fps === reel.fps && (!caps || ex.opt.burn),
+        captions: caps && ex.opt.sidecar,
         signal: ex.abort.signal,
         onProgress: (i, n) => {
           ex.job = { state: 'running', pct: (i / n) * 97, line: `Drawing frames (${i}/${n})…` };
@@ -322,6 +351,7 @@ async function startFrames() {
   } catch (e) {
     ex.job = e.message === 'Cancelled' ? { state: 'idle' } : { state: 'error', line: e.status === 409 ? 'An export is already running.' : e.message };
   }
+  if (hidden && live.raw === hidden) live.load(shown); // unless an edit already showed something newer
   ex.abort = null;
   render();
   updateButton();

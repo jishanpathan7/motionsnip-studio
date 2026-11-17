@@ -33,10 +33,12 @@ import {
   acceptFinding,
   dismissFinding,
   restoreFinding,
+  setRequest,
+  requestText,
 } from './state.js';
 import { seek, currentTime, player, duration } from './video.js';
 import { pinNote, openNote, editText, openSpot, render as renderOverlay } from './overlay.js';
-import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount } from './feedback.js';
+import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount, sceneApplicable, applySceneNow } from './feedback.js';
 import { h, icon, fmtTime, round, clamp, projectUrl, toast, copyText, baseName } from './util.js';
 import { on as plainOn, renderPane as renderPlainEdit } from './vedit.js';
 import { inspector as trackInspector, selectedClipId } from './tracks.js';
@@ -842,6 +844,8 @@ function renderChanges() {
     );
   }
 
+  if (!reel.derived) wrap.append(describeBox());
+
   const spotted = renderSpotted();
   if (spotted) wrap.append(spotted);
 
@@ -955,6 +959,27 @@ function renderChanges() {
     );
   }
 
+  if (requestText()) any = true;
+
+  // a scene's edits can be written into scene.json right here; notes and moved boxes still need Claude
+  const app = sceneApplicable();
+  if (app.keys.length) {
+    const btn = h(
+      'button.btn.btn-sm',
+      {
+        type: 'button',
+        onclick: async () => {
+          btn.disabled = true;
+          await applySceneNow();
+          btn.disabled = false;
+        },
+      },
+      icon('check', 15),
+      `Apply ${app.keys.length} edit${app.keys.length === 1 ? '' : 's'} now`,
+    );
+    wrap.append(h('div.apply-now', btn, h('p.small.muted', `Writes ${app.keys.length === 1 ? 'it' : 'them'} into scene.json as v${store.master.version + 1}, without Claude. Notes and moved things still go to Claude.`)));
+  }
+
   // Send area
   const unsent = unsentChanges().length + nq.length;
   const counts = countsLine();
@@ -982,6 +1007,20 @@ function renderChanges() {
   );
   wrap.append(preview);
   return wrap;
+}
+
+/** Ask Claude for something new, in words: it goes into the feedback file as "New request". */
+function describeBox() {
+  const ta = h('textarea.input.describe-input', {
+    rows: 3,
+    'aria-label': 'Ask Claude for something new',
+    placeholder: store.master.timeline
+      ? 'Describe a new video or part: "a 20 s launch teaser: a stuck developer, then our app saves the day, with captions and upbeat music"'
+      : 'Describe something new for Claude to make or change',
+  });
+  ta.value = requestText();
+  ta.addEventListener('input', () => setRequest(ta.value));
+  return section('Ask for something new', ta, h('p.small.muted.describe-help', 'Goes to Claude with Send, with your edits and notes.'));
 }
 
 /** Claude's self-review: what it spotted in its own render, for the reviewer to accept or dismiss. */

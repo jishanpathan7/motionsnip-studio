@@ -416,6 +416,35 @@ export function textShown(clip, u) {
   return t.slice(0, n);
 }
 
+// ---------------------------------------------------------------- caption files
+
+/** Every caption a viewer sees, in time order: [{ a, b, text }] in seconds. Hidden caption tracks are left out. */
+export function captionCues(tl) {
+  const cues = [];
+  const solo = tl.tracks.some((t) => t.kind === 'captions' && t.solo);
+  for (const tr of tl.tracks) {
+    if (tr.kind !== 'captions' || tr.hide || (solo && !tr.solo)) continue;
+    for (const c of tr.clips) if (c.text && c.text.trim() && c.dur > 0) cues.push({ a: c.at, b: c.end, text: c.text.trim() });
+  }
+  return cues.sort((x, y) => x.a - y.a || x.b - y.b);
+}
+
+function stampOf(t, sep) {
+  const ms = Math.max(0, Math.round(t * 1000));
+  const p = (v, n = 2) => String(v).padStart(n, '0');
+  return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)}${sep}${p(ms % 1000, 3)}`;
+}
+
+/** SubRip (.srt). */
+export function toSrt(cues) {
+  return cues.map((c, i) => `${i + 1}\n${stampOf(c.a, ',')} --> ${stampOf(c.b, ',')}\n${c.text}\n`).join('\n');
+}
+
+/** WebVTT (.vtt). */
+export function toVtt(cues) {
+  return 'WEBVTT\n\n' + cues.map((c) => `${stampOf(c.a, '.')} --> ${stampOf(c.b, '.')}\n${c.text.replace(/-->/g, '→')}\n`).join('\n');
+}
+
 // ---------------------------------------------------------------- the reel the player understands
 
 const FULL = [0, 0, 100, 100];

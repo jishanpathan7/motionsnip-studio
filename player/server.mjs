@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
 import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
 import { toReel as sceneToReel, applyPatches as applyScenePatches, normScene } from './app/scene/compile.mjs';
-import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline } from './app/comp/timeline.mjs';
+import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline, captionCues, toSrt, toVtt } from './app/comp/timeline.mjs';
 import { applyOps } from './app/comp/ops.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, countPngs } from './lib/frames.mjs';
 
@@ -1423,7 +1423,7 @@ async function apiFramesStart(ctx, req, res) {
   const args = buildFramesArgs({ fps, w, h, frames, out, format, encoder, audio });
   const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['pipe', 'pipe', 'pipe'] });
   const id = crypto.randomBytes(6).toString('hex');
-  const job = { id, child, total: frames, got: 0, last: Date.now(), out, rel, format, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif' };
+  const job = { id, child, total: frames, got: 0, last: Date.now(), out, rel, format, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif', captions: !!body.captions && !!reel.timeline };
   let errText = '';
   child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
   child.stdin.on('error', () => {}); // EPIPE when ffmpeg stops early; reported from 'close'
@@ -1494,9 +1494,21 @@ async function apiFramesEnd(ctx, req, res, url) {
         /* the export still worked */
       }
     }
-    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${j.rel}` });
+    const side = j.captions ? await writeCaptionFiles(ctx, j.out).catch(() => []) : [];
+    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${j.rel}${side.length ? ` and its captions (${side.join(', ')})` : ''}` });
   }
   return sendJson(res, 200, ctx.job);
+}
+
+/** A timeline's captions next to an export: name.srt and name.vtt. Returns the extensions written. */
+async function writeCaptionFiles(ctx, out) {
+  const { raw } = readProjectFile(ctx, 'timeline.json');
+  const cues = captionCues(normTimeline(raw, { scenes: await timelineScenes(ctx, raw) }));
+  if (!cues.length) return [];
+  const base = out.replace(/\.[^./\\]+$/, '');
+  fs.writeFileSync(base + '.srt', toSrt(cues));
+  fs.writeFileSync(base + '.vtt', toVtt(cues));
+  return ['.srt', '.vtt'];
 }
 
 // --- Export ------------------------------------------------------------------
@@ -2468,6 +2480,14 @@ async function selftest() {
       assert.deepEqual([e.tracks[3].id, e.tracks[3].clips[0].id, e.tracks[3].clips[0].at], ['g2', 'c1', 2], 'new ids are the smallest free ones');
       assert.deepEqual(T.normTimeline(e, { scenes }).markers.map((m) => m.name), ['Hook']);
       assert.deepEqual(O.ensureIds({ tracks: [{ kind: 'audio', clips: [{}, { id: 'c1' }] }] }).tracks[0].clips.map((c) => c.id), ['c2', 'c1']);
+
+      // caption files: time order, hidden tracks left out, SubRip and WebVTT stamps
+      const capTl = T.normTimeline({ tracks: [{ kind: 'captions', clips: [{ at: 3.5, dur: 1.25, text: 'Two' }, { at: 0.2, dur: 2, text: ' One ' }, { at: 9, dur: 1, text: '' }] }, { kind: 'captions', hide: true, clips: [{ at: 1, dur: 1, text: 'Hidden' }] }] });
+      const cues = T.captionCues(capTl);
+      assert.deepEqual(cues.map((c) => c.text), ['One', 'Two']);
+      assert.equal(T.toSrt(cues), '1\n00:00:00,200 --> 00:00:02,200\nOne\n\n2\n00:00:03,500 --> 00:00:04,750\nTwo\n');
+      assert.ok(T.toVtt(cues).startsWith('WEBVTT\n\n00:00:00.200 --> 00:00:02.200\nOne\n'));
+      assert.equal(T.toSrt(T.captionCues(T.normTimeline({ tracks: [{ kind: 'captions', clips: [{ at: 3725.5, dur: 1, text: 'x' }] }] }))).split('\n')[1], '01:02:05,500 --> 01:02:06,500');
 
       // graphics: presets settle, a scene cut hides the scene's own transition, CSS matches the canvas transform
       const G = await import('./app/comp/graphics.mjs');
