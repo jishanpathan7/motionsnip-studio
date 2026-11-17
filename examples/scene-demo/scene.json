@@ -1,0 +1,54 @@
+{
+  "title": "Idea to animation",
+  "version": 1,
+  "size": [1920, 1080],
+  "fps": 30,
+  "style": { "preset": "ink" },
+  "cast": {
+    "ana": { "kind": "person", "name": "Ana", "look": { "hair": "bun", "shirt": "accent" } },
+    "bolt": { "kind": "robot", "name": "Bolt", "look": { "body": "soft" } }
+  },
+  "props": {
+    "desk": { "kit": "desk" },
+    "laptop": { "kit": "laptop", "text": "render 12%" },
+    "bulb": { "kit": "bulb", "name": "Idea" },
+    "chart": { "kit": "chart", "data": [2, 3, 5, 9], "name": "Chart" },
+    "title": { "kit": "text", "text": "Describe it. Watch it move.", "size": 72, "name": "Title" },
+    "spark": { "kit": "star", "name": "Spark" }
+  },
+  "shots": [
+    {
+      "id": "stuck", "name": "Stuck", "dur": 4.5,
+      "place": { "ana": [770, 885], "desk": [1040, 885], "laptop": [930, 715] },
+      "beats": [
+        { "at": 0.3, "who": "ana", "do": "type", "dur": 1.4 },
+        { "at": 1.5, "who": "ana", "do": "say", "text": "Another forty-minute render?" },
+        { "at": 3.1, "who": "ana", "do": "emote", "as": "frustrated" }
+      ]
+    },
+    {
+      "id": "help", "name": "Help arrives", "dur": 5, "in": "fade",
+      "place": { "ana": [770, 885], "desk": null, "laptop": null, "bulb": [1180, 520] },
+      "beats": [
+        { "at": 0.1, "who": "ana", "do": "emote", "as": "neutral" },
+        { "at": 0.2, "who": "bolt", "do": "enter", "from": "right", "to": [1240, 885] },
+        { "at": 1.6, "who": "bolt", "do": "say", "text": "Tell me the idea. I'll animate it." },
+        { "at": 3.0, "what": "bulb", "do": "pop" },
+        { "at": 3.6, "who": "bolt", "do": "hand", "what": "bulb", "to": "ana" },
+        { "at": 4.3, "who": "ana", "do": "emote", "as": "happy" }
+      ]
+    },
+    {
+      "id": "shipped", "name": "Shipped", "dur": 4.5, "in": "wipe",
+      "place": { "ana": [560, 885], "bolt": [1380, 885], "chart": [960, 820], "title": [960, 190], "spark": [1180, 470], "bulb": null },
+      "beats": [
+        { "at": 0.2, "what": "title", "do": "draw-on", "dur": 1.2 },
+        { "at": 0.5, "what": "chart", "do": "draw-on", "dur": 1.6 },
+        { "at": 2.0, "what": "spark", "do": "pop" },
+        { "at": 2.2, "who": "ana", "do": "cheer", "dur": 1.6 },
+        { "at": 2.4, "who": "bolt", "do": "wave", "dur": 1.4 },
+        { "at": 2.6, "do": "camera", "zoom": 1.12, "dur": 1.6 }
+      ]
+    }
+  ]
+}

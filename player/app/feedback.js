@@ -48,13 +48,28 @@ function isUploaded(id) {
  * One line per change, in the spec's format, plus a short label for the UI.
  * Returns { section, line, short, detail, at, sceneId }.
  */
+/** For a scene: the same move in scene pixels (things stand on their bottom centre), so Claude can edit "place". */
+function sceneMove(c, el, sc) {
+  const reel = store.master;
+  if (!reel?.scene || !el?.entity || !c.before || !c.after) return '';
+  const [x, y, w, h] = c.before;
+  const [nx, ny, nw, nh] = c.after;
+  const dx = Math.round(((nx + nw / 2 - (x + w / 2)) / 100) * reel.w);
+  const dy = Math.round(((ny + nh - (y + h)) / 100) * reel.h);
+  const parts = [];
+  if (dx || dy) parts.push(`move ${el.entity} by [${dx}, ${dy}] px in shot ${sc?.id || '?'}`);
+  if (Math.abs((c.scale ?? 1) - 1) > 0.02) parts.push(`scale it by ${round(c.scale, 2)}`);
+  return parts.length ? `: ${parts.join(', ')}` : '';
+}
+
 export function describe(c) {
   if (c.kind === 'prop') {
     const el = getEl(c.elId);
     const sc = sceneOfEl(c.elId);
     const p = el?.props[c.propKey];
     const at = Number.isFinite(c.at) ? c.at : el?.t[0] || 0;
-    const src = el?.src ? ` (${el.src})` : '';
+    // a scene prop names its exact place in scene.json
+    const src = p?.path && store.master?.scene ? ` (scene.json › ${p.path})` : el?.src ? ` (${el.src})` : '';
     return {
       section: 'edits',
       at,
@@ -73,7 +88,7 @@ export function describe(c) {
       section: 'edits',
       at,
       sceneId: sc?.id,
-      line: `- [${fmtTime(at)} · ${sc?.id || '?'} · ${el?.label || c.elId}] Size and position${src}: ${boxStr(c.before)} -> ${boxStr(c.after)} (scale ${round(c.scale ?? 1, 2)})`,
+      line: `- [${fmtTime(at)} · ${sc?.id || '?'} · ${el?.label || c.elId}] Size and position${src}: ${boxStr(c.before)} -> ${boxStr(c.after)} (scale ${round(c.scale ?? 1, 2)})${sceneMove(c, el, sc)}`,
       short: `${el?.label || c.elId} · Size and position`,
       detail: `${boxStr(c.after)} · scale ${round(c.scale ?? 1, 2)}`,
     };
@@ -83,7 +98,9 @@ export function describe(c) {
     return {
       section: 'edits',
       at: null,
-      line: `- [Look · Brand colour] ${col?.name || c.colorId} (brand.${c.colorId}): ${q(c.before)} -> ${q(c.after)} (changes everything linked to it)`,
+      line: store.master?.scene
+        ? `- [Look · Scene colour] ${col?.name || c.colorId} (scene.json › style.palette.${c.colorId}): ${q(c.before)} -> ${q(c.after)} (changes everything drawn in it)`
+        : `- [Look · Brand colour] ${col?.name || c.colorId} (brand.${c.colorId}): ${q(c.before)} -> ${q(c.after)} (changes everything linked to it)`,
       short: `Brand colour · ${col?.name || c.colorId}`,
       detail: `${c.before} → ${c.after}`,
     };
@@ -159,6 +176,7 @@ export function buildMarkdown(list = store.data.changes) {
   out.push(`MotionSnip Studio feedback for "${reel.title}" v${reel.version}`);
   if (reel.plain) out.push(`Video: ${reel.file || reel.src} (a plain video file, no reel.json) · ${reel.w}x${reel.h} · ${round(reel.duration, 2)}s`);
   else out.push(`Project: ${reel.path || '(unknown path)'} · ${reel.w}x${reel.h} · ${reel.fps} fps · ${round(reel.duration, 2)}s`);
+  if (reel.scene) out.push('This is a MotionSnip scene: change scene.json (there is no reel.json; MotionSnip Studio builds the reel from the scene). Moved boxes mean: move that thing in that shot (its "place", or the "to" of the beat that moves it). Keep ids stable.');
   if (reel.reference) out.push(`Reference: ${reel.reference}`);
 
   const ds = list.map((c) => ({ c, d: describe(c) }));
@@ -221,7 +239,7 @@ export function buildMarkdown(list = store.data.changes) {
       out.push('', `The reviewer is also editing this video in MotionSnip Studio (${plainSummary()}). Leave those to them: MotionSnip Studio applies them itself when it exports. Times above are in the original video.`);
     }
     out.push('', `Next version: this is a plain video file, not a MotionSnip project. Make the changes and export the new cut over the same file (${reel.src}); MotionSnip Studio counts that as v${reel.version + 1}.`);
-  } else out.push('', `Next version: set "version" to ${reel.version + 1} in reel.json.`);
+  } else out.push('', `Next version: set "version" to ${reel.version + 1} in ${reel.scene ? 'scene.json' : 'reel.json'}.`);
   return out.join('\n') + '\n';
 }
 

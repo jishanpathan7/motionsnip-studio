@@ -148,6 +148,7 @@ export function initPlayback({ video, music, cmp, liveHost, frameMsg }) {
   bus.on('changes', (d) => {
     if (d.audio || d.undone || d.upload) syncMusicSrc();
     if (d.box && player.live) pushLiveBoxes();
+    if (player.live && typeof player.live.setProps === 'function') pushLiveProps();
   });
 
   requestAnimationFrame(tick);
@@ -172,7 +173,8 @@ export function loadReel({ keepTime = false, startAt = null } = {}) {
   } else {
     v.removeAttribute('src');
     v.load();
-    player.frameMsg.hidden = false;
+    // a scene draws itself; it has a video only once it's been exported
+    player.frameMsg.hidden = !!reel.scene;
     player.frameMsg.textContent = 'reel.json has no "src" video yet.';
   }
   player._virtual.t = t;
@@ -492,28 +494,58 @@ function syncCompare() {
 
 // ---------------------------------------------------------------- live renderer
 
-function loadLive(file, version) {
+function loadLive(live, version) {
   const host = player.liveHost;
   host.innerHTML = '';
   player.live = null;
+  const token = (player._liveToken = (player._liveToken || 0) + 1);
+  const started = (api) => {
+    if (token !== player._liveToken) return;
+    if (!api || typeof api.seek !== 'function') throw new Error('MotionSnipLive() must return { seek, play, pause, setRate, setBoxes }');
+    player.live = api;
+    document.body.classList.add('has-live');
+    player.frameMsg.hidden = true;
+    safeLive('setRate', player.rate);
+    safeLive('seek', currentTime());
+    pushLiveBoxes();
+    pushLiveProps();
+    if (player._playing) safeLive('play');
+    bus.emit('live', { on: true });
+  };
+  const failed = (msg) => {
+    if (token !== player._liveToken) return;
+    console.warn('[motionsnip] live renderer failed:', msg);
+    toast(`Live renderer didn't start: ${msg}. Showing the video.`);
+    document.body.classList.remove('has-live');
+  };
+
+  // a scene project: scene.json drawn by MotionSnip's own scene runtime (no project code runs)
+  if (live && typeof live === 'object' && live.type === 'scene') {
+    const specUrl = projectUrl(live.spec || 'scene.json') + `?v=${version}`;
+    Promise.all([
+      fetch(specUrl).then((r) => {
+        if (!r.ok) throw new Error(`${live.spec || 'scene.json'} returned ${r.status}`);
+        return r.json();
+      }),
+      import('./scene/runtime.js'),
+    ])
+      .then(([raw, mod]) => {
+        if (token !== player._liveToken) return;
+        started(mod.createScene(host, raw, { asset: (p) => projectUrl(p) }));
+      })
+      .catch((e) => failed(e.message));
+    return;
+  }
+
+  const file = live;
   const s = document.createElement('script');
   s.src = projectUrl(file) + `?v=${version}`;
   s.onload = () => {
     try {
       if (typeof window.MotionSnipLive !== 'function') throw new Error('window.MotionSnipLive is not a function');
-      const api = window.MotionSnipLive(host);
-      if (!api || typeof api.seek !== 'function') throw new Error('MotionSnipLive() must return { seek, play, pause, setRate, setBoxes }');
-      player.live = api;
-      document.body.classList.add('has-live');
-      player.frameMsg.hidden = true;
-      safeLive('setRate', player.rate);
-      safeLive('seek', currentTime());
-      pushLiveBoxes();
-      bus.emit('live', { on: true });
+      started(window.MotionSnipLive(host));
     } catch (e) {
-      console.warn('[motionsnip] live renderer failed:', e.message);
-      toast(`Live renderer didn't start: ${e.message}. Showing the video.`);
-      document.body.classList.remove('has-live');
+      failed(e.message);
     }
   };
   s.onerror = () => {
@@ -529,6 +561,30 @@ function safeLive(fn, arg) {
     l[fn](arg);
   } catch (e) {
     console.warn('[motionsnip] live.' + fn + ' failed:', e.message);
+  }
+}
+
+/**
+ * Script and Look edits, shown at once: setProps({ elId: { prop: value } }, patches). A scene also gets the
+ * same edits as scene.json patches ([{ path, value }]), from each prop's `path`, plus palette changes.
+ */
+export function pushLiveProps() {
+  const l = player.live;
+  if (!l || typeof l.setProps !== 'function' || !store.reel) return;
+  const els = new Map((store.reel.scenes || []).flatMap((s) => s.els.map((e) => [e.id, e])));
+  const edits = {};
+  const patches = [];
+  for (const c of store.data.changes) {
+    if (c.kind === 'prop') {
+      (edits[c.elId] ||= {})[c.propKey] = c.after;
+      const path = els.get(c.elId)?.props?.[c.propKey]?.path;
+      if (path) patches.push({ path, value: c.after });
+    } else if (c.kind === 'brand' && store.reel.scene) patches.push({ path: `style.palette.${c.colorId}`, value: c.after });
+  }
+  try {
+    l.setProps(edits, patches);
+  } catch (e) {
+    console.warn('[motionsnip] live.setProps failed:', e.message);
   }
 }
 

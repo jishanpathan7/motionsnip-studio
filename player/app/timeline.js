@@ -30,7 +30,7 @@ const tl = {
   tipText: null,
   thumb: null,
   peaks: { music: null, fx: null },
-  peaksFor: { music: null, fx: null },
+  peaksFor: { music: undefined, fx: undefined }, // undefined: not looked yet (null is "no file")
   drag: null, // { kind: 'offset'|'fade', ... }
   width: 0,
 };
@@ -130,8 +130,8 @@ export function loadTimeline() {
     tl.thumb.src = projectUrl(reel.src) + `?v=${reel.version}&thumb`;
     tl.thumb.load();
   }
-  tl.peaksFor.fx = null;
-  tl.peaksFor.music = null;
+  tl.peaksFor.fx = undefined;
+  tl.peaksFor.music = undefined;
   layout();
   loadWaves();
 }

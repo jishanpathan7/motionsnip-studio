@@ -18,6 +18,7 @@ Licence: MIT, `Copyright (c) 2026 Jishan Pathan`. Written from scratch from this
 ```
 <project>/
   reel.json            the project description (below), written by Claude
+  scene.json           instead of reel.json, for a scene project (section 6a)
   <video>              the render that reel.json "src" points at (mp4/webm/mov)
   assets/              user files: music uploads, images
   public/              optional; files Remotion's staticFile() points at (served at the site root as a fallback)
@@ -259,6 +260,24 @@ If reel.json has `"live": "<file.js>"`, the player loads it as a classic script 
 `window.MotionSnipLive(container)` which must return `{ seek(timeSeconds), play(), pause(), setRate(r), setBoxes(boxes) }`.
 `boxes[id] = [x, y, w, h, nx, ny, nw, nh]` (original then edited, % of frame). The player then hides the `<video>` and
 drives the live renderer instead; Export offers `mode: "render"`.
+
+## 6a. Scene projects
+
+A folder with `scene.json` and no `reel.json` is a scene project (the format is in SKILL.md section 10). The server
+builds the reel with `toReel()` from `player/app/scene/compile.mjs`, the same module the browser uses:
+
+- shots become `scenes`; each cast member, prop and line in a shot becomes an element `<id>@<shot>` (lines are
+  `line<beat>@<shot>`), with a box measured from the scene, and props that carry `path`, the exact place in
+  scene.json (`cast.ana.look.shirt`, `shots[0].beats[1].text`, `props.chart.data`);
+- the palette becomes `brand.colors`, so the Look tab recolours the scene;
+- `review` is the scene's own checks (too fast to read, cut off by the next shot, off the frame, unknown names);
+- `live` is `{ "type": "scene", "spec": "scene.json" }`, `scene: true`, and `src` is the last export, if any.
+
+The player imports `player/app/scene/runtime.js` instead of loading a script. Besides the live-renderer calls it
+takes `setProps(edits, patches)`: edits are `{ elId: { prop: value } }`, patches `[{ path, value }]` in scene.json.
+The player sends both on every change, so Script and Look edits show at once. A moved box becomes an offset of that
+thing in that shot. Drawing is pure: `frameSVG(spec, t)` (`draw.mjs`) returns the same SVG for the same `t`.
+Feedback lines for a scene name scene.json paths and pixel moves, and "Next version" points at scene.json.
 
 ## 7. Brand (see docs/brand/README.md)
 

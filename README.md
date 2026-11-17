@@ -100,6 +100,21 @@ One master, every shape. **+ Cutdown** above the frame makes a **9:16**, **1:1**
 - Notes on a cutdown go to Claude under their own heading, on that version's frame and clock. If the master changes, the cutdown's tab shows a dot until you re-render it.
 - Claude can lay a code-built video out again for 9:16 and list it in `reel.json` `outputs`; it shows up as a tab the same way.
 
+## Animated scenes
+
+Describe a scene in words and Claude makes it: hand-drawn people and robots, props, speech bubbles, charts that draw themselves, camera moves and shot transitions. Claude writes `scene.json` (data, not code) and MotionSnip Studio draws it live, so it plays and scrubs at once.
+
+- Everything is reviewable like any project: shots are scenes in the timeline, each person, prop and line is an element. Click a line to retype it, recolour a shirt, drag someone to move them in that shot; it shows straight away.
+- **Send to Claude** names exact places in `scene.json` (`shots[0].beats[1].text`), so the next version changes only what you asked.
+- MotionSnip Studio checks the scene itself and rings what a viewer would trip on: lines too fast to read, a line cut off by the next shot, something off the frame.
+- Three looks to start (`ink`, `marker`, `flat`) with your own palette. Try `examples/scene-demo`:
+
+```bash
+node player/server.mjs examples/scene-demo
+```
+
+Video export of scenes comes next; for now a scene plays live in the player.
+
 ## Player controls
 
 | Key or action | What it does |
@@ -245,9 +260,11 @@ player/server.mjs     the local server (Node 18+, no dependencies)
 player/lib/           server helpers (cutdowns)
 player/index.html     the player page
 player/app/           the player's scripts and styles
+player/app/scene/     the scene compiler and hand-drawn renderer (no dependencies)
 docs/SPEC.md          the full product spec
 docs/brand/           logo, favicons and the brand guide
 examples/demo/        a small example project (synthetic video and music)
+examples/scene-demo/  a scene project: scene.json drawn live
 ```
 
 ## Licence
