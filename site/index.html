@@ -117,6 +117,7 @@ h2{font-weight:800;font-size:clamp(30px,4.4vw,46px);line-height:1.05;letter-spac
 .art text{font:600 11px var(--mono)}
 .art .lbl{fill:var(--mute)}
 .art .on-sky{fill:var(--bg)}
+.art .on-tape{fill:var(--tape-ink)}
 
 .install{display:grid;grid-template-columns:5fr 7fr;gap:48px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:40px}
 .install h2{font-size:clamp(30px,3.4vw,40px);max-width:14ch}
@@ -316,16 +317,37 @@ footer a{color:var(--ink-2)}
         <div><h3>Swap and mix music</h3><p>Drop in a track, drag when it starts, set the fade and the levels.</p></div>
         <div><h3>Approve scene by scene</h3><p>Approved scenes stay untouched in the next version.</p></div>
         <div><h3>Compare versions</h3><p>Hold V to flip to the previous version at the same frame.</p></div>
-        <div><h3>Export the final mp4</h3><p>One click, with your music mixed in, using ffmpeg on your machine.</p></div>
+        <div><h3>Export the final video</h3><p>MP4, HEVC, ProRes, WebM or GIF, with your music mixed in, using ffmpeg on your machine.</p></div>
       </div>
     </section>
 
     <section id="more" aria-labelledby="more-h">
       <p class="kicker">Beyond review</p>
       <h2 id="more-h">More than a review player.</h2>
-      <p class="sub">The same player edits any video file, checks Claude’s work before you see it, and turns one master into every shape you post.</p>
+      <p class="sub">The same player is a timeline editor, edits any video file, checks Claude’s work before you see it, and turns one master into every shape you post.</p>
       <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="none"/><line x1="0" y1="0" x2="0" y2="6" stroke="#ff4fa8" stroke-width="2.4" opacity=".55"/></pattern></defs></svg>
       <div class="more">
+        <article class="card">
+          <div class="art" aria-hidden="true">
+            <svg viewBox="0 0 260 80">
+              <rect class="mute" x="6" y="6" width="248" height="20" rx="4"/>
+              <rect class="mute" x="6" y="30" width="248" height="20" rx="4"/>
+              <rect class="mute" x="6" y="54" width="248" height="20" rx="4"/>
+              <rect class="ln fillp" x="14" y="9" width="92" height="14" rx="3"/>
+              <rect class="ln fillp" x="110" y="9" width="70" height="14" rx="3"/>
+              <rect class="tape" x="60" y="33" width="64" height="14" rx="3"/>
+              <rect class="ln fillp" x="22" y="57" width="200" height="14" rx="3"/>
+              <path class="mute" d="M30 64h4M40 61v6M48 60v8M56 62v4M64 59v10M72 62v4M80 60v8M88 63v2M96 61v6M104 60v8"/>
+              <path class="cue" d="M150 2v76"/>
+              <path class="cue" d="M146 2h8"/>
+            </svg>
+          </div>
+          <div class="body">
+            <p class="tag">Timeline</p>
+            <h3>A real editor, shared with Claude</h3>
+            <p>Video, scene, graphics, sound and caption tracks. Move, trim, split and slip clips, add animated text and transitions, set keyframes, drop in your own footage. Every edit saves to the same file Claude works on, so it changes exactly what you see.</p>
+          </div>
+        </article>
         <article class="card">
           <div class="art" aria-hidden="true">
             <svg viewBox="0 0 260 80">
@@ -396,7 +418,25 @@ footer a{color:var(--ink-2)}
           <div class="body">
             <p class="tag">Animated scenes</p>
             <h3>Hand-drawn scenes from a sentence</h3>
-            <p>Describe a scene and Claude writes it as data: people, robots, props, speech bubbles and camera moves. It plays and scrubs at once, and every line is yours to retype. Video export of scenes comes next.</p>
+            <p>Describe a scene and Claude writes it as data: people, robots, props, speech bubbles and camera moves. It plays and scrubs at once, and every line is yours to retype. Export it like any video.</p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="art" aria-hidden="true">
+            <svg viewBox="0 0 260 80">
+              <rect class="ln fillp" x="14" y="10" width="58" height="26" rx="6"/><text class="lbl" x="29" y="27">MP4</text>
+              <rect class="ln fillp" x="80" y="10" width="68" height="26" rx="6"/><text class="lbl" x="91" y="27">ProRes</text>
+              <rect class="ln fillp" x="156" y="10" width="44" height="26" rx="6"/><text class="lbl" x="164" y="27">GIF</text>
+              <rect class="tape" x="208" y="10" width="40" height="26" rx="6"/><text class="on-tape" x="217" y="27">4K</text>
+              <rect class="mute fillp" x="40" y="48" width="180" height="24" rx="5"/>
+              <path class="ln" d="M70 60h88"/>
+              <text class="lbl" x="166" y="64">.srt</text>
+            </svg>
+          </div>
+          <div class="body">
+            <p class="tag">Export</p>
+            <h3>Any format, captions included</h3>
+            <p>MP4, HEVC, ProRes, WebM or GIF, from 720p to 4K at 24 to 60 fps, with the sound mixed in. Burn the captions into the picture, or save them as <code>.srt</code> and <code>.vtt</code> files beside the video.</p>
           </div>
         </article>
       </div>
