@@ -16,7 +16,7 @@
 
 1. You ask Claude for a motion graphic: a launch video, an explainer, a product promo.
 2. Claude builds it in code (for example with Remotion), renders it, and describes it in `reel.json`.
-3. Claude opens the player. You watch it on your own machine.
+3. Claude checks its own render first and marks anything it isn't sure about. Then it opens the player. You watch it on your own machine.
 4. You fix words in place, swap the music, set levels, move things, and circle problems on the frame.
 5. You mark each scene **Approved** or **Needs changes**. Claude leaves approved scenes alone.
 6. You click **Send to Claude**. The player writes your changes to a file and copies one line to your clipboard.
@@ -124,6 +124,12 @@ Side panel tabs: **Edit** (the selected element), **Script** (every line of text
 
 Deep links: `#t=12.5&el=headline`, `#tab=sound`, `?theme=dark`.
 
+## Claude's self-review
+
+Before you see v1, Claude grabs frames from its own render and looks for small text, things outside the safe area, low contrast, typos, overflow and flash frames on cuts. Whatever it couldn't fix, or isn't sure about, shows up on the frame as a dashed blue ring labelled **C1**, **C2**… and in **Changes** under **Claude spotted**.
+
+Click a ring to read what Claude saw and what it suggests. **Add as my note** turns it into your own note, so it goes back with your feedback. **Dismiss** tells Claude you're happy with it, and it won't flag it again. The demo reel ships with three real findings to try.
+
 ## What Claude receives
 
 When you send, the player writes `.motionsnip/feedback-v<N>.md` in the project and copies one line to your clipboard. The file looks like this:
@@ -144,6 +150,11 @@ The video carries sound effects only; music is a separate file.
 
 ## Comments on the frame
 1. [00:23.9 · S4 Outro · x 23.9% y 81.8% · on Logo (src/Outro.tsx:9)] Logo feels too small here
+2. [00:01.5 · S1 Hook · x 90.0% y 11.5% · on Cue dot] Cue dot sits outside the title-safe area. (from your self-review, v3-1; the reviewer agrees)
+
+## Dismissed from your self-review
+The reviewer looked at these and is happy as it is. Leave them, and don't flag them again.
+- v3-2 [00:08.0] Scene 2 cards flash on the light background
 
 ## Scenes
 S1 Hook (00:00.0-00:04.5): approved

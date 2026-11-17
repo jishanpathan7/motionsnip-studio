@@ -147,5 +147,10 @@
       ]
     }
   ],
-  "notes": []
+  "notes": [],
+  "review": [
+    {"id": "v1-1", "t": 1.5, "elId": "cue-dot", "kind": "safe area", "title": "Cue dot sits outside the title-safe area", "detail": "The dot spans 88–92% across and starts 8% from the top. Title-safe is a 10% inset, so it pokes past the right and top edges and can be cropped on some screens.", "fix": "Move it in to about [84, 11, 4, 7] so it sits inside the 10% inset."},
+    {"id": "v1-2", "t": 8.0, "box": [10, 30, 80, 40], "kind": "cut", "title": "Scene 2 cards flash on the light background", "detail": "On the cut at 8.0 s (frame 240) the background turns light one frame before the Watch and Fix cards leave, so they flash on the wrong colour.", "fix": "End the cards on frame 239, or switch the background on frame 241 with them."},
+    {"id": "v1-3", "t": 8.2, "x": 50, "y": 50, "kind": "timing", "title": "Half a second of empty frame before the logo", "detail": "From 8.03 s to 8.5 s the frame is plain paper. The logo only lands on frame 255, so the end card starts on nothing.", "fix": "Bring the logo block in at 8.0 s, or fade it up from the cut."}
+  ]
 }

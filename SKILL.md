@@ -52,6 +52,16 @@ Open the image and look at it. Fix clipped text, empty frames, wrong colours and
 ffmpeg -v error -y -ss 12.4 -i video.mp4 -frames:v 1 /tmp/frame.png
 ```
 
+**Self-review.** Then look again as a picky reviewer would, and write down what you still see. Check:
+
+- **Safe area.** Anything that matters inside a 10% inset from every edge (title-safe)?
+- **Size.** Body text at least about 3% of the frame height, so it reads on a phone.
+- **Contrast.** Text and key shapes clearly apart from what is behind them.
+- **Typos and overflow.** Every word spelled right, nothing clipped or running out of its box.
+- **Cuts and timing.** No flash frames on a cut, no empty frames, nothing gone before it can be read.
+
+Fix what you can. For anything left, or anything that is a matter of taste, add a finding to `review` in `reel.json` (section 4). The player draws each one as a dashed blue ring labelled C1, C2… on that frame, and the user either adds it as their own note or dismisses it. Only write what you actually saw in a frame grab: give the time, and the spot or element, so the ring lands on it. Leave `review` empty when there is nothing to say; don't pad it.
+
 ## 4. Write reel.json
 
 `reel.json` is the contract between you and the player. Write plain JSON (no comments).
@@ -93,6 +103,12 @@ ffmpeg -v error -y -ss 12.4 -i video.mp4 -frames:v 1 /tmp/frame.png
     ] }
   ],
   "notes": [],
+  "review": [                       // optional: your own self-review findings (section 3)
+    { "id": "v1-1", "t": 1.5, "elId": "headline", "kind": "safe area",
+      "title": "Headline runs into the right edge",
+      "detail": "At 1.5 s the last word ends 2% from the edge, outside title-safe.",
+      "fix": "Narrow the box to 56% or drop the size a step." }
+  ],
   "live": "live.js",                // optional live renderer (section 7)
   "export": { "cwd": "/abs/build/folder", "props": {}, "cmd": "npx remotion render ... \"$OUT\" --props=\"$PROPS\"" }  // optional (section 8)
 }
@@ -107,6 +123,7 @@ Rules:
 - `src` should point at the code that draws the element, so you can find it later.
 - Every prop value must equal what is actually rendered. The player ticks an edit as done when the new `reel.json` value matches what was asked.
 - `path` can be left out; the server fills in the project folder.
+- **`review` findings:** `id` (unique in this version, e.g. `v2-1`), `t` (seconds), `title` (one line), optional `detail`, `fix` and `kind` (`safe area`, `size`, `contrast`, `typo`, `overflow`, `cut`, `timing` or your own word). Place it with `elId` (an element id, ringed at its box), `box: [x, y, w, h]`, or `x`, `y` in % of the frame. Write a fresh list for every version; don't repeat anything the user dismissed.
 - Unknown fields are ignored. Missing optional fields get defaults.
 
 ## 5. Open the player
@@ -133,6 +150,8 @@ The user pastes `Apply the MotionSnip Studio feedback in <project>/.motionsnip/f
 - **Sound settings.** New track (already saved in `assets/`), start offset, fade, volumes. Update `audio` in `reel.json`. If the video carries effects only, you usually don't need to re-render for these. If music is baked in (`videoAudio: "mix"`), re-render with the new settings.
 - **Comments on the frame.** Free comments pinned to a time and a spot (`x 23.9% y 81.8%`), often on a named element. Grab that frame and look at it before you decide what to do. Notes are requests, not exact values; use judgement and keep the rest of the scene intact.
 - **Not quite from vN-1.** Things you changed last round that the user says aren't right yet, with their reason. Fix these first.
+- **From your self-review.** A comment ending `(from your self-review, v1-2; the reviewer agrees)` is one of your own findings that the user accepted. Treat it like any other note.
+- **Dismissed from your self-review.** Findings the user looked at and is happy with. Leave those things as they are, and don't flag them again in the next `review`.
 - **Scenes.** Each scene's status. **Leave approved scenes alone** unless an edit or note names them.
 
 Then:

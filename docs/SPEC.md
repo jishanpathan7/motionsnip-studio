@@ -67,6 +67,9 @@ Licence: MIT, `Copyright (c) 2026 Jishan Pathan`. Written from scratch from this
     ] }
   ],
   "notes": [],
+  "review": [                       // optional: Claude's self-review of this render
+    { "id": "v1-1", "t": 1.5, "elId": "headline", "kind": "safe area", "title": "…", "detail": "…", "fix": "…" }
+  ],
   "live": "live.js",                // optional live renderer (section 6)
   "export": { "cwd": "/abs/build/folder", "props": {}, "cmd": "npx remotion render ... \"$OUT\" --props=\"$PROPS\"" }  // optional
 }
@@ -75,6 +78,13 @@ Licence: MIT, `Copyright (c) 2026 Jishan Pathan`. Written from scratch from this
 Prop types: `text`, `longtext`, `number`, `color` (a value like `brand.accent` links to the palette),
 `media` (an asset id), `list` (rows; `cols: [{k, type, options?}]`), `choice` (`options: [...]`), `motion`
 (free text describing movement; the reviewer can't edit it directly, only comment).
+
+`review` findings are placed by `elId` (ringed at that element's box), `box: [x, y, w, h]` or `x`, `y` in %. The player
+draws each as a dashed sky-blue ring with a "C<n>" badge (a rounded rectangle for a box, a hand-drawn ring for a point),
+visible from 0.75 s before `t` to 2.5 s after. Clicking one opens a card with the title, detail and suggested fix, and two
+actions: **Add as my note** (it becomes a normal pink note carrying the finding id) and **Dismiss**. Changes lists open
+and dismissed findings under "Claude spotted", with Show me, accept, dismiss and bring back. The decision is saved per
+version (`review: { "v<N>:<id>": "accepted" | "dismissed" }` in the saved state), so a new version starts fresh.
 
 Scenes cover 0..duration without gaps. Ids stay stable between versions; saved edits match by id.
 Unknown fields are ignored; missing optional fields get defaults.
@@ -196,6 +206,11 @@ Project: <path> · <w>x<h> · <fps> fps · <duration>s
 
 ## Comments on the frame
 1. [<mm:ss.s> · <scene id> <scene name> · x 23.9% y 81.8% · on <element label> (<src>)] <comment>
+2. [<mm:ss.s> · …] <comment> (from your self-review, <finding id>; the reviewer agrees)
+
+## Dismissed from your self-review
+The reviewer looked at these and is happy as it is. Leave them, and don't flag them again.
+- <finding id> [<mm:ss.s>] <title>
 
 ## Not quite from v<N-1>
 - <item> — <reason>

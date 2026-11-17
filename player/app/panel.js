@@ -27,9 +27,15 @@ import {
   notes,
   noteNumber,
   unsentChanges,
+  openFindings,
+  dismissedFindings,
+  findingNumber,
+  acceptFinding,
+  dismissFinding,
+  restoreFinding,
 } from './state.js';
 import { seek, currentTime, player, duration } from './video.js';
-import { pinNote, openNote, editText } from './overlay.js';
+import { pinNote, openNote, editText, openSpot, render as renderOverlay } from './overlay.js';
 import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount } from './feedback.js';
 import { h, icon, fmtTime, round, clamp, projectUrl, toast, copyText, baseName } from './util.js';
 import { on as plainOn, renderPane as renderPlainEdit } from './vedit.js';
@@ -806,6 +812,9 @@ function renderChanges() {
     );
   }
 
+  const spotted = renderSpotted();
+  if (spotted) wrap.append(spotted);
+
   const list = store.data.changes;
   const groups = [
     ['edits', 'Edits'],
@@ -900,6 +909,7 @@ function renderChanges() {
     );
   }
 
+  if (spotted) any = true;
   if (!any && !ch) {
     wrap.append(
       h(
@@ -937,6 +947,50 @@ function renderChanges() {
   );
   wrap.append(preview);
   return wrap;
+}
+
+/** Claude's self-review: what it spotted in its own render, for the reviewer to accept or dismiss. */
+function renderSpotted() {
+  const open = openFindings();
+  const gone = dismissedFindings();
+  if (!open.length && !gone.length) return null;
+  const item = (f, dismissed) =>
+    h(
+      'li.citem' + (dismissed ? '.is-sent' : ''),
+      h('span.cspot', 'C' + findingNumber(f.id)),
+      h(
+        'div.cbody',
+        h('div.cshort', f.title),
+        h('div.cdetail.small.muted', [fmtTime(f.t), f.kind, dismissed ? 'dismissed' : f.fix ? 'Fix: ' + f.fix : ''].filter(Boolean).join(' · ')),
+      ),
+      h(
+        'div.cact',
+        dismissed
+          ? h('button.btn.btn-ghost.btn-xs', { type: 'button', title: 'Bring it back', 'aria-label': 'Bring it back', onclick: () => restoreFinding(f.id) }, icon('undo', 14))
+          : [
+              h('button.btn.btn-ghost.btn-xs', { type: 'button', title: 'Show me', 'aria-label': 'Show me', onclick: () => openSpot(f.id) }, icon('jump', 14)),
+              h(
+                'button.btn.btn-ghost.btn-xs',
+                {
+                  type: 'button',
+                  title: 'Add as my note',
+                  'aria-label': 'Add as my note',
+                  onclick: () => {
+                    acceptFinding(f.id);
+                    renderOverlay(true);
+                  },
+                },
+                icon('check', 14),
+              ),
+              h('button.btn.btn-ghost.btn-xs', { type: 'button', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: () => dismissFinding(f.id) }, icon('x', 14)),
+            ],
+      ),
+    );
+  return section(
+    `Claude spotted${open.length ? ` · ${open.length}` : ''}`,
+    open.length ? h('p.cspot-head', 'Claude checked its own render and left these for you. Add the ones you agree with as your notes, dismiss the rest.') : null,
+    h('ul.clist', [...open.map((f) => item(f, false)), ...gone.map((f) => item(f, true))]),
+  );
 }
 
 function countsLine() {
