@@ -4,8 +4,12 @@
 // A small local server for the review player. It serves the player page, the
 // project's files and a JSON API. Node 18+, no dependencies.
 //
-//   node player/server.mjs <project-dir> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
+//   node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
 //   node player/server.mjs --selftest
+//
+// A folder with a reel.json is a Claude-built project. A folder without one (or a
+// video file) opens as a plain video: the server makes up a reel from the file,
+// and the player can trim, cut, colour and put text, logos and blurs on it.
 //
 // MIT licence. Copyright (c) 2026 Jishan Pathan.
 
@@ -27,9 +31,14 @@ const INDEX_FILE = path.join(HERE, 'index.html');
 const DEFAULT_PORT = 4321;
 const PORT_TRIES = 20;
 const JSON_LIMIT = 2 * 1024 * 1024; // 2 MB
+const EXPORT_LIMIT = 64 * 1024 * 1024; // an edit export carries its text and logo layers as PNGs
+const LAYER_LIMIT = 16 * 1024 * 1024; // one layer PNG
+const MAX_LAYERS = 40;
 const UPLOAD_LIMIT = 100 * 1024 * 1024; // 100 MB
 const KEEP_TAKES = 6;
 const AUDIO_EXTS = ['mp3', 'wav', 'm4a'];
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp']; // logos and pictures put on a plain video
+const VIDEO_EXTS = ['mp4', 'm4v', 'mov', 'webm']; // what a browser <video> can usually play
 
 const MIME = {
   html: 'text/html; charset=utf-8',
@@ -146,6 +155,16 @@ export function sniffAudio(buf) {
   return null;
 }
 
+/** Guess an image type from its first bytes: 'png' | 'jpg' | 'webp' | null. */
+export function sniffImage(buf) {
+  if (!buf || buf.length < 4) return null;
+  const ascii = (from, to) => buf.subarray(from, to).toString('latin1');
+  if (buf[0] === 0x89 && ascii(1, 4) === 'PNG') return 'png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
 /** Host header must name this server (blocks DNS rebinding). */
 export function hostAllowed(host, port) {
   if (typeof host !== 'string') return false;
@@ -209,14 +228,29 @@ function stripJsonComments(text) {
   return out.replace(/,(\s*[}\]])/g, '$1');
 }
 
-/** Read the duration and whether there is an audio stream from `ffmpeg -i` output. */
+/**
+ * Read `ffmpeg -i` output: duration, audio/video streams, and the picture's size and frame rate.
+ * Phone videos shot upright carry a rotation; their size is reported as shown (width and height swapped).
+ */
 export function parseProbe(stderr) {
   const text = String(stderr || '');
   const d = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
   const duration = d ? Number(d[1]) * 3600 + Number(d[2]) * 60 + Number(d[3]) : null;
   const hasAudio = /Stream #\d+:\d+[^\n]*: Audio:/.test(text);
-  const hasVideo = /Stream #\d+:\d+[^\n]*: Video:/.test(text);
-  return { duration, hasAudio, hasVideo };
+  const video = /Stream #\d+:\d+[^\n]*: Video:[^\n]*/.exec(text);
+  const out = { duration, hasAudio, hasVideo: !!video, w: null, h: null, fps: null };
+  if (video) {
+    const wh = /, (\d{2,5})x(\d{2,5})/.exec(video[0]);
+    const f = /([\d.]+) fps/.exec(video[0]) || /([\d.]+) tbr/.exec(video[0]);
+    if (wh) {
+      out.w = Number(wh[1]);
+      out.h = Number(wh[2]);
+      const rot = /rotation of (-?[\d.]+) degrees/.exec(text) || /rotate\s*:\s*(-?\d+)/.exec(text);
+      if (rot && Math.abs(Math.round(Number(rot[1]) / 90)) % 2 === 1) [out.w, out.h] = [out.h, out.w];
+    }
+    if (f && Number(f[1]) > 0 && Number(f[1]) <= 240) out.fps = Math.round(Number(f[1]) * 100) / 100;
+  }
+  return out;
 }
 
 /** Last "n/m" pair in some command output, as a 0-100 percentage (or null). */
@@ -277,6 +311,185 @@ export function buildMixArgs(opts) {
   }
   args.push('-c:v', 'copy', '-t', fmt(D), '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', opts.out);
   return args;
+}
+
+// ---------------------------------------------------------------------------
+// Editing a plain video: trim, cuts, colour, blur boxes, text and logo layers
+// ---------------------------------------------------------------------------
+
+const n3 = (v) => Math.round(Number(v) * 1000) / 1000;
+const within = (v, fallback, lo, hi) => clamp(num(v, fallback), lo, hi);
+
+/**
+ * The parts of a D-second video that stay: inside the trim [in, out], minus the cuts.
+ * Sorted, none shorter than 0.05 s. The player plays the same ranges.
+ */
+export function keepRanges(D, trim, cuts) {
+  const a = within(trim?.[0], 0, 0, D);
+  const b = within(trim?.[1], D, 0, D);
+  let keep = b - a >= 0.05 ? [[a, b]] : [];
+  const list = (Array.isArray(cuts) ? cuts : [])
+    .slice(0, 200)
+    .map((c) => [within(c?.[0], 0, 0, D), within(c?.[1], 0, 0, D)])
+    .map(([x, y]) => [Math.min(x, y), Math.max(x, y)])
+    .filter(([x, y]) => y - x > 0.001);
+  for (const [x, y] of list) {
+    keep = keep.flatMap(([p, q]) => (y <= p || x >= q ? [[p, q]] : [[p, x], [y, q]].filter(([u, v]) => v - u >= 0.05)));
+  }
+  return keep.map(([p, q]) => [n3(p), n3(q)]);
+}
+
+/** Colour sliders, each -1..1, rounded to hundredths. */
+export function normLook(look) {
+  const f = (v) => Math.round(within(v, 0, -1, 1) * 100) / 100;
+  return { brightness: f(look?.brightness), contrast: f(look?.contrast), saturation: f(look?.saturation), warmth: f(look?.warmth) };
+}
+
+/**
+ * The colour look as numbers: a 3x3 channel mix M (saturation, warmth), then out = in * k + o per channel
+ * (contrast, brightness; values 0..1). The player previews the same numbers with an SVG filter, in sRGB.
+ */
+export function lookMatrix(look) {
+  const L = normLook(look);
+  const s = 1 + L.saturation;
+  const k = 1 + L.contrast;
+  const lum = [0.2126, 0.7152, 0.0722];
+  const gain = [1 + 0.1 * L.warmth, 1 + 0.02 * L.warmth, 1 - 0.1 * L.warmth];
+  const M = [0, 1, 2].map((i) => [0, 1, 2].map((j) => n3(gain[i] * ((1 - s) * lum[j] + (i === j ? s : 0)))));
+  return { M, k: n3(k), o: n3(0.5 - 0.5 * k + 0.2 * L.brightness) };
+}
+
+/** The look as an ffmpeg filter chain ('' when nothing changes). */
+export function lookFilter(look) {
+  const { M, k, o } = lookMatrix(look);
+  const parts = [];
+  const rgb = ['r', 'g', 'b'];
+  if (M.some((row, i) => row.some((v, j) => v !== (i === j ? 1 : 0)))) {
+    parts.push('colorchannelmixer=' + rgb.flatMap((c, i) => rgb.map((d, j) => `${c}${d}=${M[i][j]}`)).join(':'));
+  }
+  if (k !== 1 || o !== 0) {
+    const e = `'clip(val*${k}${o < 0 ? '-' : '+'}${n3(Math.abs(o) * 255)},0,255)'`;
+    parts.push(`lutrgb=r=${e}:g=${e}:b=${e}`);
+  }
+  return parts.join(',');
+}
+
+/**
+ * ffmpeg arguments for exporting an edited plain video.
+ *   opts: { video, hasVideoAudio, W, H, fps, D, keep, look, layers, music, musicVol, sfxVol, musicOffset, musicFade, encoder, out }
+ *   layers (source time, drawn in order): { kind: 'blur', t: [a, b], box: [X, Y, w, h] px, sigma }
+ *                                       | { kind: 'png', t: [a, b], file, fade }
+ * The music runs on the edited (output) clock, so its offset and fade are where the reviewer heard them.
+ */
+export function buildEditArgs(opts) {
+  const { W, H, D, keep } = opts;
+  if (!(D > 0) || !W || !H) throw new Error('size and duration are required');
+  if (!Array.isArray(keep) || !keep.length) throw new Error('nothing to keep');
+  const layers = Array.isArray(opts.layers) ? opts.layers : [];
+  const pngs = layers.filter((l) => l.kind === 'png');
+  const parts = [];
+  let cur = '[0:v]';
+  let n = 0;
+  const label = () => `[v${++n}]`;
+  const step = (filter) => {
+    const o = label();
+    parts.push(`${cur}${filter}${o}`);
+    cur = o;
+  };
+
+  const look = lookFilter(opts.look);
+  if (look) step(look);
+  for (const l of layers) {
+    const on = `enable='between(t,${n3(l.t[0])},${n3(l.t[1])})'`;
+    if (l.kind === 'blur') {
+      const [X, Y, w, h] = l.box;
+      const [main, copy, blurred, o] = [label(), label(), label(), label()];
+      parts.push(`${cur}split${main}${copy}`, `${copy}crop=${w}:${h}:${X}:${Y},gblur=sigma=${n3(l.sigma)}${blurred}`, `${main}${blurred}overlay=${X}:${Y}:${on}${o}`);
+      cur = o;
+    } else {
+      const input = 1 + pngs.indexOf(l);
+      const F = l.fade ? n3(Math.min(0.4, (l.t[1] - l.t[0]) / 3)) : 0;
+      const fades = F ? `,fade=t=in:st=${n3(l.t[0])}:d=${F}:alpha=1,fade=t=out:st=${n3(l.t[1] - F)}:d=${F}:alpha=1` : '';
+      const pic = label();
+      parts.push(`[${input}:v]scale=${W}:${H},format=rgba${fades}${pic}`);
+      step(`${pic}overlay=0:0:${on}`);
+    }
+  }
+
+  // Trim and cuts: keep each range, then join them.
+  const whole = keep.length === 1 && keep[0][0] <= 0.001 && keep[0][1] >= D - 0.001;
+  let va = opts.hasVideoAudio ? '[0:a]' : null;
+  if (!whole) {
+    const N = keep.length;
+    const vt = ([a, b]) => `trim=start=${a}:end=${b},setpts=PTS-STARTPTS`;
+    const at = ([a, b]) => `atrim=start=${a}:end=${b},asetpts=PTS-STARTPTS`;
+    if (N === 1) {
+      step(vt(keep[0]));
+      if (va) {
+        parts.push(`[0:a]${at(keep[0])}[va]`);
+        va = '[va]';
+      }
+    } else {
+      parts.push(`${cur}split=${N}${keep.map((_, i) => `[s${i}]`).join('')}`, ...keep.map((r, i) => `[s${i}]${vt(r)}[t${i}]`));
+      if (va) parts.push(`[0:a]asplit=${N}${keep.map((_, i) => `[r${i}]`).join('')}`, ...keep.map((r, i) => `[r${i}]${at(r)}[u${i}]`));
+      parts.push(`${keep.map((_, i) => `[t${i}]${va ? `[u${i}]` : ''}`).join('')}concat=n=${N}:v=1:a=${va ? 1 : 0}[vc]${va ? '[va]' : ''}`);
+      cur = '[vc]';
+      if (va) va = '[va]';
+    }
+  }
+  parts.push(`${cur}scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[vf]`); // back from RGB to standard HD video
+
+  const OD = n3(keep.reduce((s, [a, b]) => s + b - a, 0));
+  const mix = [];
+  const fit = 'aformat=sample_rates=48000:channel_layouts=stereo';
+  if (va) {
+    parts.push(`${va}${fit},volume=${fmt(clamp(num(opts.sfxVol, 1), 0, 1))}[a0]`);
+    mix.push('[a0]');
+  }
+  if (opts.music) {
+    const offset = num(opts.musicOffset, 0);
+    const fade = clamp(num(opts.musicFade, 0), 0, OD);
+    const chain = [fit];
+    if (offset > 0) chain.push(`adelay=${Math.round(offset * 1000)}:all=1`);
+    if (offset < 0) chain.push(`atrim=start=${fmt(-offset)}`, 'asetpts=PTS-STARTPTS');
+    chain.push(`volume=${fmt(clamp(num(opts.musicVol, 1), 0, 1))}`, `apad=whole_dur=${fmt(OD)}`, `atrim=end=${fmt(OD)}`);
+    if (fade > 0) chain.push(`afade=t=out:st=${fmt(OD - fade)}:d=${fmt(fade)}`);
+    parts.push(`[${1 + pngs.length}:a:0]${chain.join(',')}[a1]`);
+    mix.push('[a1]');
+  }
+  if (mix.length === 2) parts.push('[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]');
+  else if (mix.length) parts.push(`${mix[0]}anull[aout]`);
+
+  const enc =
+    opts.encoder === 'libx264'
+      ? ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18']
+      : opts.encoder === 'h264_videotoolbox'
+        ? ['-c:v', 'h264_videotoolbox', '-b:v', '12M']
+        : ['-c:v', 'mpeg4', '-q:v', '2'];
+  const fps = fmt(num(opts.fps, 30) || 30);
+  return [
+    '-y', '-hide_banner', '-nostdin',
+    '-i', opts.video,
+    ...pngs.flatMap((l) => ['-loop', '1', '-framerate', fps, '-t', fmt(D), '-i', l.file]),
+    ...(opts.music ? ['-i', opts.music] : []),
+    '-filter_complex', parts.join(';'),
+    '-map', '[vf]',
+    ...(mix.length ? ['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k'] : ['-an']),
+    ...enc,
+    '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
+    '-t', fmt(OD), '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats',
+    opts.out,
+  ];
+}
+
+/** Filters an edit export needs. Some trimmed builds (Remotion's) leave many of them out. */
+export const EDIT_FILTERS = ['overlay', 'trim', 'atrim', 'concat', 'split', 'asplit', 'crop', 'gblur', 'colorchannelmixer', 'lutrgb', 'fade', 'scale', 'format', 'amix', 'adelay', 'volume', 'afade', 'apad', 'aformat', 'anull'];
+
+/** From `ffmpeg -filters` and `ffmpeg -encoders` output: the H.264 encoder to use for edits, or null if it can't. */
+export function pickEditEncoder(filtersText, encodersText) {
+  const have = new Set([...String(filtersText).matchAll(/^ [A-Z.|]{2,4} (\S+) /gm)].map((m) => m[1]));
+  if (!EDIT_FILTERS.every((f) => have.has(f))) return null;
+  return ['libx264', 'h264_videotoolbox', 'mpeg4'].find((e) => new RegExp(`^ V\\S* ${e} `, 'm').test(String(encodersText))) || null;
 }
 
 /** Turn an id into a safe file-name piece. */
@@ -372,8 +585,8 @@ function readBody(req, limit) {
   });
 }
 
-async function readJson(req) {
-  const buf = await readBody(req, JSON_LIMIT);
+async function readJson(req, limit = JSON_LIMIT) {
+  const buf = await readBody(req, limit);
   try {
     return JSON.parse(buf.toString('utf8') || 'null');
   } catch {
@@ -488,13 +701,117 @@ async function probe(ff, file) {
   return parseProbe(r.stderr);
 }
 
+/** Which H.264 encoder this ffmpeg can export edits with (null: it can't). Cached per binary. */
+async function editEncoder(ctx, ff) {
+  if (!ff) return null;
+  if (ctx.editEnc?.path === ff.path) return ctx.editEnc.encoder;
+  const env = ffmpegEnv(ff);
+  const [filters, encoders] = await Promise.all([run(ff.path, ['-hide_banner', '-filters'], { env }), run(ff.path, ['-hide_banner', '-encoders'], { env })]);
+  const encoder = pickEditEncoder(filters.stdout, encoders.stdout);
+  ctx.editEnc = { path: ff.path, encoder };
+  return encoder;
+}
+
+// ---------------------------------------------------------------------------
+// Plain videos (a folder with no reel.json)
+// ---------------------------------------------------------------------------
+
+/** The video to open in a folder with no reel.json: the newest playable one at the top level, or null. */
+export function pickVideo(dir) {
+  let best = null;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const e of entries) {
+    if (!e.isFile() || e.name.startsWith('.') || !VIDEO_EXTS.includes(extOf(e.name))) continue;
+    let m = 0;
+    try {
+      m = fs.statSync(path.join(dir, e.name)).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!best || m > best.m) best = { name: e.name, m };
+  }
+  return best ? best.name : null;
+}
+
+/**
+ * A plain video's version: 1 the first time, +1 each time the file changes (a new cut exported over the
+ * same name), counted once the file has stopped changing for 2 s. Kept in .motionsnip/video.json.
+ * Opening a different video in the same folder starts again at 1 and drops the old takes.
+ */
+export function videoVersion(dir, name, stat, now = Date.now()) {
+  const file = path.join(dir, '.motionsnip', 'video.json');
+  const sig = `${stat.size}:${Math.round(stat.mtimeMs)}`;
+  let saved = {};
+  try {
+    saved = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+  } catch {}
+  const same = saved.src === name;
+  const ver = Math.max(1, Math.floor(Number(saved.version)) || 1);
+  if (same && (saved.sig === sig || now - stat.mtimeMs < 2000)) return ver;
+  const version = same ? ver + 1 : 1;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (!same && saved.src) fs.rmSync(path.join(dir, '.motionsnip', 'takes'), { recursive: true, force: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ src: name, sig, version }));
+    fs.renameSync(tmp, file);
+  } catch {
+    /* a read-only folder still plays; it just can't count versions */
+  }
+  return version;
+}
+
+/** Make up a reel from the video itself. */
+async function plainReel(ctx) {
+  const name = ctx.video || pickVideo(ctx.dir);
+  if (!name) throw httpError(404, `No reel.json or video file in ${ctx.dir}`);
+  const file = path.join(ctx.dir, name);
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    throw httpError(404, `Video not found: ${file}`);
+  }
+  const sig = `${file}:${stat.size}:${stat.mtimeMs}`;
+  if (ctx.probed?.sig !== sig) {
+    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    ctx.probed = { sig, info: ff ? await probe(ff, file) : {} };
+  }
+  const info = ctx.probed.info;
+  const stem = name.slice(0, name.length - path.extname(name).length);
+  const reel = {
+    id: `${slug(stem)}-${crypto.createHash('sha1').update(file).digest('hex').slice(0, 6)}`,
+    title: name,
+    version: videoVersion(ctx.dir, name, stat),
+    src: name,
+    path: ctx.dir,
+    file,
+    plain: true,
+    audio: { videoAudio: 'mix' }, // its sound is the whole soundtrack, not effects
+    scenes: [],
+  };
+  if (info.duration > 0) reel.duration = Math.round(info.duration * 1000) / 1000;
+  if (info.w && info.h) {
+    reel.w = info.w;
+    reel.h = info.h;
+  }
+  if (info.fps) reel.fps = info.fps;
+  return reel;
+}
+
 // ---------------------------------------------------------------------------
 // The server
 // ---------------------------------------------------------------------------
 
 /**
  * Start the server. Resolves to { server, port, url, close() }.
- *   opts: { dir, port, open, ffmpeg, quiet }
+ *   opts: { dir, video, port, open, ffmpeg, quiet }
+ *   video: a file name in dir to open as a plain video (else the newest video there, when there's no reel.json)
  */
 export async function startServer(opts) {
   const dir = path.resolve(opts.dir);
@@ -502,6 +819,9 @@ export async function startServer(opts) {
     dir,
     port: 0,
     ffmpegArg: opts.ffmpeg || null,
+    video: opts.video || null,
+    probed: null, // the plain video's last ffmpeg probe
+    editEnc: null, // { path, encoder } for edit exports
     job: { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null },
     child: null,
     takesBusy: new Set(),
@@ -646,16 +966,18 @@ async function api(ctx, req, res, route, url) {
       return apiTakes(ctx, res);
     case 'GET ffmpeg': {
       const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
-      return sendJson(res, 200, { ok: !!ff, path: ff ? ff.path : null });
+      // edits: this ffmpeg can export a plain video's trim, cuts, colour and layers
+      return sendJson(res, 200, { ok: !!ff, path: ff ? ff.path : null, edits: !!(await editEncoder(ctx, ff)) });
     }
     default:
       return sendError(res, 404, 'Unknown API route');
   }
 }
 
-/** Load reel.json, or throw an http error with a short message. */
-function loadReel(ctx) {
+/** Load reel.json (or, with none, the plain video's made-up reel), or throw an http error with a short message. */
+async function loadReel(ctx) {
   const file = path.join(ctx.dir, 'reel.json');
+  if (!fs.existsSync(file)) return plainReel(ctx);
   let text;
   try {
     text = fs.readFileSync(file, 'utf8');
@@ -673,8 +995,8 @@ function loadReel(ctx) {
   return reel;
 }
 
-function apiReel(ctx, res) {
-  const reel = loadReel(ctx);
+async function apiReel(ctx, res) {
+  const reel = await loadReel(ctx);
   ensureTake(ctx, reel); // snapshot this version's video for compare (in the background)
   return sendJson(res, 200, reel);
 }
@@ -697,8 +1019,9 @@ async function apiPostState(ctx, req, res) {
 }
 
 async function apiUpload(ctx, req, res, url) {
-  const name = cleanName(url.searchParams.get('name'));
-  if (!name) throw httpError(400, 'Only mp3, wav or m4a files can be uploaded');
+  const name = cleanName(url.searchParams.get('name'), [...AUDIO_EXTS, ...IMAGE_EXTS]);
+  if (!name) throw httpError(400, 'Only mp3, wav, m4a, png, jpg or webp files can be uploaded');
+  const type = IMAGE_EXTS.includes(extOf(name)) ? 'image' : 'audio';
   if (Number(req.headers['content-length']) > UPLOAD_LIMIT) throw httpError(413, 'File is over 100 MB');
 
   const assets = path.join(ctx.dir, 'assets');
@@ -730,7 +1053,9 @@ async function apiUpload(ctx, req, res, url) {
     const fd = await fsp.open(tmp, 'r');
     await fd.read(head, 0, 16, 0);
     await fd.close();
-    if (sniffAudio(head) !== extOf(name)) throw httpError(415, `This doesn't look like a .${extOf(name)} file`);
+    const want = extOf(name) === 'jpeg' ? 'jpg' : extOf(name);
+    const got = type === 'image' ? sniffImage(head) : sniffAudio(head);
+    if (got !== want) throw httpError(415, `This doesn't look like a .${extOf(name)} file`);
 
     // Never overwrite: link fails if the name is taken, so try name-2, name-3...
     let final = null;
@@ -745,7 +1070,7 @@ async function apiUpload(ctx, req, res, url) {
     }
     if (!final) throw httpError(500, 'No free file name');
     const base = path.basename(final);
-    return sendJson(res, 200, { id: `assets/${base}`, name: base, type: 'audio' });
+    return sendJson(res, 200, { id: `assets/${base}`, name: base, type });
   } finally {
     await fsp.rm(tmp, { force: true });
   }
@@ -833,7 +1158,7 @@ function ensureTake(ctx, reel) {
 
 async function apiTakes(ctx, res) {
   try {
-    await ensureTake(ctx, loadReel(ctx));
+    await ensureTake(ctx, await loadReel(ctx));
   } catch {}
   const takes = listTakes(ctx).map((t) => ({
     version: t.version,
@@ -860,9 +1185,9 @@ function lastLine(text) {
 
 async function apiExport(ctx, req, res) {
   if (ctx.job.state === 'running') throw httpError(409, 'An export is already running');
-  const body = (await readJson(req)) || {};
-  const mode = body.mode === 'render' ? 'render' : 'mix';
-  const reel = loadReel(ctx);
+  const body = (await readJson(req, EXPORT_LIMIT)) || {};
+  const mode = ['render', 'edit'].includes(body.mode) ? body.mode : 'mix';
+  const reel = await loadReel(ctx);
 
   // Music: a project path, or none.
   let music = null;
@@ -890,6 +1215,23 @@ async function apiExport(ctx, req, res) {
       throw httpError(400, 'reel.json has no export.cmd');
     }
     runRender(ctx, reel, body.props, levels, out).catch((err) => setJob(ctx, { state: 'error', line: err.message }));
+  } else if (mode === 'edit') {
+    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    const encoder = await editEncoder(ctx, ff);
+    const video = resolveInside(ctx.dir, String(reel.src || ''));
+    const fail = (line) => {
+      setJob(ctx, { state: 'error', line, out: null, rel: null });
+      return sendJson(res, 200, ctx.job);
+    };
+    if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
+    if (!encoder) return fail("This ffmpeg can't apply edits (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
+    if (!video || !isFile(video)) return fail(`Video not found: ${reel.src}`);
+    runEdit(ctx, ff, encoder, video, reel, body.edit, levels, out)
+      .then(() => setJob(ctx, { state: 'done', pct: 100, line: `Saved ${rel}` }))
+      .catch((err) => {
+        fs.rmSync(out, { force: true });
+        setJob(ctx, { state: 'error', line: err.message, out: null, rel: null });
+      });
   } else {
     const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
     if (!ff) {
@@ -935,6 +1277,71 @@ async function runMix(ctx, ff, video, levels, out, reelDuration) {
       else reject(new Error(lastLine(errText) || `ffmpeg exited with code ${code}`));
     });
   });
+}
+
+/**
+ * Export an edited plain video: trim, cuts, colour, blur boxes, and text/logo layers the player drew as
+ * full-frame PNGs (data URLs in edit.layers[].png). Updates ctx.job.pct over the edited length.
+ */
+async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
+  const info = await probe(ff, video);
+  const D = info.duration || num(reel.duration, 0);
+  const W = info.w;
+  const H = info.h;
+  if (!(D > 0) || !W || !H) throw new Error("Couldn't read the video's length or size");
+  const e = edit && typeof edit === 'object' ? edit : {};
+  const keep = keepRanges(D, e.trim, e.cuts);
+  if (!keep.length) throw new Error('Nothing left to export: the cuts cover the whole video');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'motionsnip-edit-'));
+  try {
+    const layers = [];
+    const span = (t) => {
+      const a = within(t?.[0], 0, 0, D);
+      const b = within(t?.[1], D, 0, D);
+      return [Math.min(a, b), Math.max(a, b)];
+    };
+    for (const l of (Array.isArray(e.layers) ? e.layers : []).slice(0, MAX_LAYERS)) {
+      if (!l || typeof l !== 'object') continue;
+      const t = span(l.t);
+      if (t[1] - t[0] < 0.02) continue;
+      if (l.kind === 'blur') {
+        // even pixel numbers, inside the frame
+        const b = (Array.isArray(l.box) ? l.box : []).map((v) => within(v, 0, 0, 100));
+        const X = Math.min(W - 2, Math.floor(((b[0] / 100) * W) / 2) * 2);
+        const Y = Math.min(H - 2, Math.floor(((b[1] / 100) * H) / 2) * 2);
+        const w = Math.min(W - X, Math.max(2, Math.round(((b[2] / 100) * W) / 2) * 2));
+        const h = Math.min(H - Y, Math.max(2, Math.round(((b[3] / 100) * H) / 2) * 2));
+        layers.push({ kind: 'blur', t, box: [X, Y, w, h], sigma: (within(l.amount, 2, 0.1, 20) / 100) * H });
+      } else if (typeof l.png === 'string' && l.png.startsWith('data:image/png;base64,')) {
+        const buf = Buffer.from(l.png.slice(22), 'base64');
+        if (buf.length > LAYER_LIMIT || sniffImage(buf) !== 'png') continue;
+        const file = path.join(tmp, `layer-${layers.length}.png`);
+        fs.writeFileSync(file, buf);
+        layers.push({ kind: 'png', t, file, fade: !!l.fade });
+      }
+    }
+    const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
+    const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W, H, fps: info.fps || reel.fps, D, keep, look: e.look, layers, encoder, out, ...levels });
+    setJob(ctx, { line: 'Applying your edits…' });
+    await new Promise((resolve, reject) => {
+      const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['ignore', 'pipe', 'pipe'] });
+      ctx.child = child;
+      let errText = '';
+      child.stdout.on('data', (d) => {
+        const m = [...String(d).matchAll(/out_time_us=(\d+)/g)].pop();
+        if (m) setJob(ctx, { pct: clamp((Number(m[1]) / 1e6 / OD) * 100, 0, 99) });
+      });
+      child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
+      child.on('error', reject);
+      child.on('close', (code) => {
+        ctx.child = null;
+        if (code === 0) resolve();
+        else reject(new Error(lastLine(errText) || `ffmpeg exited with code ${code}`));
+      });
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -995,6 +1402,26 @@ async function runRender(ctx, reel, reqProps, levels, out) {
 // ---------------------------------------------------------------------------
 // Self test
 // ---------------------------------------------------------------------------
+
+/** Test helper: one HTTP request to a test server. */
+function request(port, method, p, { body, headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port, method, path: p, headers: { host: `localhost:${port}`, ...headers } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        let json = null;
+        try {
+          json = JSON.parse(buf.toString());
+        } catch {}
+        resolve({ status: res.statusCode, headers: res.headers, buf, json });
+      });
+    });
+    r.on('error', reject);
+    r.end(body);
+  });
+}
 
 async function selftest() {
   const assert = (await import('node:assert/strict')).default;
@@ -1085,8 +1512,61 @@ async function selftest() {
     const probeText = `Input #0, mov,mp4: Duration: 00:01:02.50, start: 0.000000, bitrate: 100 kb/s
   Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1280x720, 30 fps
   Stream #0:1[0x2](und): Audio: aac (LC), 48000 Hz, stereo`;
-    assert.deepEqual(parseProbe(probeText), { duration: 62.5, hasAudio: true, hasVideo: true });
+    assert.deepEqual(parseProbe(probeText), { duration: 62.5, hasAudio: true, hasVideo: true, w: 1280, h: 720, fps: 30 });
     assert.equal(parseProbe('Duration: 00:00:10.00\n Stream #0:0: Video: h264').hasAudio, false);
+    const upright = 'Duration: 00:00:05.00\n  Stream #0:0: Video: hevc, yuv420p, 1920x1080, 29.97 fps\n    side data:\n      displaymatrix: rotation of -90.00 degrees';
+    assert.deepEqual([parseProbe(upright).w, parseProbe(upright).h, parseProbe(upright).fps], [1080, 1920, 29.97]);
+    assert.equal(parseProbe('Stream #0:0: Video: h264, 640x360, 25 tbr').fps, 25);
+
+    // Image magic bytes
+    assert.equal(sniffImage(b([0x89], 'PNG', [13, 10, 26, 10])), 'png');
+    assert.equal(sniffImage(b([0xff, 0xd8, 0xff, 0xe0])), 'jpg');
+    assert.equal(sniffImage(b('RIFF', [0, 0, 0, 0], 'WEBP', 'VP8 ')), 'webp');
+    assert.equal(sniffImage(b('RIFF', [0, 0, 0, 0], 'WAVE', 'fmt ')), null);
+    assert.equal(sniffImage(b('<svg>')), null);
+    assert.equal(cleanName('Logo Final.PNG', [...AUDIO_EXTS, ...IMAGE_EXTS]), 'Logo-Final.png');
+    assert.equal(cleanName('logo.png'), null, 'images only where asked for');
+
+    // Plain video edits: what stays, the colour look, the ffmpeg graph
+    assert.deepEqual(keepRanges(10, null, []), [[0, 10]]);
+    assert.deepEqual(keepRanges(10, [1, 9], [[3, 4]]), [[1, 3], [4, 9]]);
+    assert.deepEqual(keepRanges(10, null, [[4, 3], [8, 12]]), [[0, 3], [4, 8]], 'cuts are sorted per pair and clamped');
+    assert.deepEqual(keepRanges(10, [0, 10], [[0, 10]]), []);
+    assert.deepEqual(keepRanges(10, null, [[5, 5.0005]]), [[0, 10]], 'a zero-length cut is ignored');
+    assert.deepEqual(keepRanges(10, ['x', null], 'nope'), [[0, 10]]);
+    assert.deepEqual(lookMatrix({}), { M: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], k: 1, o: 0 });
+    assert.equal(lookFilter({}), '');
+    assert.equal(lookFilter({ brightness: 0.5 }), "lutrgb=r='clip(val*1+25.5,0,255)':g='clip(val*1+25.5,0,255)':b='clip(val*1+25.5,0,255)'");
+    assert.match(lookFilter({ saturation: -1 }), /^colorchannelmixer=rr=0\.213:rg=0\.715:rb=0\.072:gr=0\.213/);
+    assert.equal(normLook({ contrast: 9, warmth: 'x' }).contrast, 1);
+    const ed = { video: 'in.mp4', hasVideoAudio: true, W: 1280, H: 720, fps: 30, D: 10, look: { contrast: 0.2 }, encoder: 'libx264', out: 'o.mp4' };
+    let ea = buildEditArgs({ ...ed, keep: [[1, 3], [4, 9]], layers: [{ kind: 'blur', t: [0, 5], box: [10, 20, 100, 50], sigma: 18 }, { kind: 'png', t: [2, 6], file: 'l.png', fade: true }], music: 'm.mp3', musicOffset: 1, musicFade: 2 });
+    let efc = ea[ea.indexOf('-filter_complex') + 1];
+    assert.ok(ea.every((a) => typeof a === 'string'));
+    assert.match(efc, /^\[0:v\]lutrgb=/);
+    assert.match(efc, /crop=100:50:10:20,gblur=sigma=18/);
+    assert.match(efc, /overlay=10:20:enable='between\(t,0,5\)'/);
+    assert.match(efc, /\[1:v\]scale=1280:720,format=rgba,fade=t=in:st=2:d=0\.4:alpha=1,fade=t=out:st=5\.6:d=0\.4:alpha=1/);
+    assert.match(efc, /split=2\[s0\]\[s1\]/);
+    assert.match(efc, /\[s1\]trim=start=4:end=9,setpts=PTS-STARTPTS\[t1\]/);
+    assert.match(efc, /\[t0\]\[u0\]\[t1\]\[u1\]concat=n=2:v=1:a=1\[vc\]\[va\]/);
+    assert.match(efc, /\[2:a:0\][^;]*adelay=1000:all=1[^;]*afade=t=out:st=5:d=2\[a1\]/, 'music on the edited clock (7 s long)');
+    assert.match(efc, /amix=inputs=2/);
+    assert.equal(ea[ea.indexOf('-t', ea.indexOf('-filter_complex')) + 1], '7');
+    assert.deepEqual(ea.slice(ea.indexOf('-loop'), ea.indexOf('-loop') + 8), ['-loop', '1', '-framerate', '30', '-t', '10', '-i', 'l.png']);
+    assert.ok(ea.includes('libx264') && ea.includes('bt709'));
+    ea = buildEditArgs({ ...ed, hasVideoAudio: false, look: null, keep: [[0, 10]] });
+    efc = ea[ea.indexOf('-filter_complex') + 1];
+    assert.equal(efc, '[0:v]scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[vf]', 'nothing to do but convert');
+    assert.ok(ea.includes('-an'));
+    ea = buildEditArgs({ ...ed, look: null, keep: [[2, 8]] });
+    efc = ea[ea.indexOf('-filter_complex') + 1];
+    assert.match(efc, /^\[0:v\]trim=start=2:end=8,setpts=PTS-STARTPTS\[v1\];\[0:a\]atrim=start=2:end=8/);
+    assert.throws(() => buildEditArgs({ ...ed, keep: [] }));
+    const filtersOut = EDIT_FILTERS.map((f) => ` TSC ${f}            V->V       x`).join('\n');
+    assert.equal(pickEditEncoder(filtersOut, ' V....D libx264              H.264\n V....D mpeg4    MPEG-4'), 'libx264');
+    assert.equal(pickEditEncoder(filtersOut, ' V....D mpeg4                MPEG-4'), 'mpeg4');
+    assert.equal(pickEditEncoder(' ... overlay  VV->V x', ' V....D libx264  H.264'), null, 'a trimmed ffmpeg cannot edit');
     assert.equal(progressFromText('Rendered 10/200, encoded 50/200'), 25);
     assert.equal(progressFromText('nothing here'), null);
     assert.equal(slug('acme/launch v2'), 'acme-launch-v2');
@@ -1122,6 +1602,26 @@ async function selftest() {
     assert.ok(args.includes('-an') && !args.includes('-filter_complex'));
     assert.throws(() => buildMixArgs({ ...common, duration: 0 }));
 
+    // Plain videos: which file, and its version
+    const pv = mkTmp();
+    assert.equal(pickVideo(pv), null);
+    fs.writeFileSync(path.join(pv, 'old.mp4'), 'a');
+    fs.writeFileSync(path.join(pv, '.hidden.mp4'), 'a');
+    fs.writeFileSync(path.join(pv, 'notes.txt'), 'a');
+    fs.writeFileSync(path.join(pv, 'new.MOV'), 'a');
+    fs.utimesSync(path.join(pv, 'old.mp4'), new Date(2020, 0, 1), new Date(2020, 0, 1));
+    assert.equal(pickVideo(pv), 'new.MOV', 'the newest playable file, no dotfiles');
+    const T = 1_800_000_000_000;
+    const st = (size, ago) => ({ size, mtimeMs: T - ago });
+    assert.equal(videoVersion(pv, 'clip.mp4', st(10, 60000), T), 1);
+    assert.equal(videoVersion(pv, 'clip.mp4', st(10, 60000), T), 1, 'same file, same version');
+    assert.equal(videoVersion(pv, 'clip.mp4', st(12, 50000), T), 2, 'the file changed');
+    assert.equal(videoVersion(pv, 'clip.mp4', st(14, 500), T), 2, 'still being written: wait');
+    assert.equal(videoVersion(pv, 'clip.mp4', st(14, 40000), T), 3);
+    fs.mkdirSync(path.join(pv, '.motionsnip', 'takes'), { recursive: true });
+    assert.equal(videoVersion(pv, 'other.mp4', st(10, 60000), T), 1, 'another video starts again');
+    assert.ok(!fs.existsSync(path.join(pv, '.motionsnip', 'takes')), "and the old video's takes go");
+
     // End to end against a temp project
     const dir = mkTmp();
     fs.mkdirSync(path.join(dir, 'public'));
@@ -1133,23 +1633,7 @@ async function selftest() {
     const srv = await startServer({ dir, port: 0, open: false, quiet: true, ffmpeg: path.join(dir, 'no-ffmpeg-here') });
     const port = srv.port;
     const origin = `http://localhost:${port}`;
-    const req = (method, p, { body, headers = {} } = {}) =>
-      new Promise((resolve, reject) => {
-        const r = http.request({ host: '127.0.0.1', port, method, path: p, headers: { host: `localhost:${port}`, ...headers } }, (res) => {
-          const chunks = [];
-          res.on('data', (c) => chunks.push(c));
-          res.on('end', () => {
-            const buf = Buffer.concat(chunks);
-            let json = null;
-            try {
-              json = JSON.parse(buf.toString());
-            } catch {}
-            resolve({ status: res.statusCode, headers: res.headers, buf, json });
-          });
-        });
-        r.on('error', reject);
-        r.end(body);
-      });
+    const req = (method, p, opts) => request(port, method, p, opts);
     try {
       const mp3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(200, 1)]);
       const post = { origin };
@@ -1243,7 +1727,7 @@ async function selftest() {
 
       // Export without ffmpeg, reveal checks, broken reel.json
       r = await req('GET', '/api/ffmpeg');
-      assert.deepEqual(r.json, { ok: false, path: null });
+      assert.deepEqual(r.json, { ok: false, path: null, edits: false });
       r = await req('POST', '/api/export', { body: JSON.stringify({ mode: 'mix' }), headers: post });
       assert.equal(r.json.state, 'error');
       assert.match(r.json.line, /ffmpeg not found/);
@@ -1257,6 +1741,101 @@ async function selftest() {
       assert.match(r.json.error, /not valid JSON/);
     } finally {
       await srv.close();
+    }
+
+    // A plain video: no reel.json, just a video file
+    const plain = mkTmp();
+    fs.writeFileSync(path.join(plain, 'My Clip.mp4'), Buffer.alloc(3000, 3));
+    const ps = await startServer({ dir: plain, port: 0, open: false, quiet: true, ffmpeg: path.join(plain, 'no-ffmpeg-here') });
+    try {
+      const preq = (method, p, opts = {}) => request(ps.port, method, p, opts);
+      const post = { origin: `http://localhost:${ps.port}` };
+      let r = await preq('GET', '/api/reel');
+      assert.equal(r.status, 200);
+      assert.equal(r.json.plain, true);
+      assert.equal(r.json.src, 'My Clip.mp4');
+      assert.equal(r.json.title, 'My Clip.mp4');
+      assert.equal(r.json.version, 1);
+      assert.match(r.json.id, /^My-Clip-[0-9a-f]{6}$/);
+      assert.deepEqual(r.json.scenes, []);
+      assert.equal(r.json.duration, undefined, 'no ffmpeg: the player reads the length from the video');
+      r = await preq('GET', '/p/My%20Clip.mp4', { headers: { range: 'bytes=0-9' } });
+      assert.equal(r.status, 206);
+      const png = Buffer.concat([Buffer.from([0x89]), Buffer.from('PNG'), Buffer.alloc(60, 1)]);
+      r = await preq('POST', '/api/upload?name=Logo.png', { body: png, headers: post });
+      assert.deepEqual(r.json, { id: 'assets/Logo.png', name: 'Logo.png', type: 'image' });
+      r = await preq('POST', '/api/upload?name=fake.jpg', { body: png, headers: post });
+      assert.equal(r.status, 415, 'image magic bytes must match');
+      r = await preq('POST', '/api/export', { body: JSON.stringify({ mode: 'edit', edit: { cuts: [[1, 2]] } }), headers: post });
+      assert.equal(r.json.state, 'error');
+      assert.match(r.json.line, /ffmpeg not found/);
+      fs.writeFileSync(path.join(plain, 'reel.json'), JSON.stringify({ id: 'made', version: 4, src: 'My Clip.mp4' }));
+      r = await preq('GET', '/api/reel');
+      assert.equal(r.json.id, 'made', 'a reel.json wins over the plain video');
+      assert.equal(r.json.plain, undefined);
+    } finally {
+      await ps.close();
+    }
+    const empty = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true });
+    try {
+      const r = await request(empty.port, 'GET', '/api/reel');
+      assert.equal(r.status, 404);
+      assert.match(r.json.error, /No reel\.json or video file/);
+    } finally {
+      await empty.close();
+    }
+
+    // With a real ffmpeg that can edit: export trim + cut + colour + blur + a layer, check the result
+    const realFf = findFfmpeg(ROOT);
+    const canEdit = realFf && (await editEncoder({}, realFf));
+    if (canEdit) {
+      const vd = mkTmp();
+      const env = ffmpegEnv(realFf);
+      const mk = await run(realFf.path, ['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-shortest', '-c:v', canEdit === 'libx264' ? 'libx264' : 'mpeg4', '-pix_fmt', 'yuv420p', '-c:a', 'aac', path.join(vd, 'clip.mp4')], { env });
+      assert.equal(mk.code, 0, 'make a test clip: ' + lastLine(mk.stderr));
+      const pngFile = path.join(vd, 'layer.png');
+      const mp = await run(realFf.path, ['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'color=c=white:s=320x180', '-frames:v', '1', pngFile], { env });
+      assert.equal(mp.code, 0, 'make a test png');
+      const es = await startServer({ dir: vd, port: 0, open: false, quiet: true, ffmpeg: realFf.path });
+      try {
+        const post = { origin: `http://localhost:${es.port}` };
+        let r = await request(es.port, 'GET', '/api/reel');
+        assert.equal(r.json.w, 320);
+        assert.equal(r.json.h, 180);
+        assert.equal(r.json.fps, 30);
+        assert.ok(Math.abs(r.json.duration - 4) < 0.1);
+        r = await request(es.port, 'GET', '/api/ffmpeg');
+        assert.equal(r.json.edits, true);
+        const edit = {
+          trim: [0.5, 3.5],
+          cuts: [[1.5, 2]],
+          look: { saturation: -0.5, brightness: 0.1 },
+          layers: [
+            { kind: 'blur', t: [0, 4], box: [10, 10, 30, 30], amount: 3 },
+            { kind: 'text', t: [1, 3], fade: true, png: 'data:image/png;base64,' + fs.readFileSync(pngFile).toString('base64') },
+            { kind: 'text', t: [1, 3], png: 'data:image/png;base64,' + Buffer.from('not a png').toString('base64') },
+          ],
+        };
+        r = await request(es.port, 'POST', '/api/export', { body: JSON.stringify({ mode: 'edit', edit, musicVol: 1, sfxVol: 0.5 }), headers: post });
+        assert.equal(r.json.state, 'running');
+        let job = r.json;
+        for (let i = 0; i < 300 && job.state === 'running'; i++) {
+          await new Promise((res) => setTimeout(res, 100));
+          job = (await request(es.port, 'GET', '/api/export')).json;
+        }
+        assert.equal(job.state, 'done', 'edit export: ' + job.line);
+        const outInfo = await probe(realFf, job.out);
+        assert.ok(Math.abs(outInfo.duration - 2.5) < 0.15, `edited length ${outInfo.duration}`);
+        assert.equal(outInfo.w, 320);
+        assert.ok(outInfo.hasAudio);
+        r = await request(es.port, 'POST', '/api/export', { body: JSON.stringify({ mode: 'edit', edit: { cuts: [[0, 4]] } }), headers: post });
+        for (job = r.json; job.state === 'running'; job = (await request(es.port, 'GET', '/api/export')).json) await new Promise((res) => setTimeout(res, 50));
+        assert.match(job.line, /Nothing left to export/);
+      } finally {
+        await es.close();
+      }
+    } else {
+      console.log('(no ffmpeg that can edit: skipped the real edit export)');
     }
 
     // Port fallback: a busy port moves to the next one.
@@ -1313,20 +1892,35 @@ async function main() {
     process.exit(2);
   }
   if (opts.help) {
-    console.log('Usage: node player/server.mjs <project-dir> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n       node player/server.mjs --selftest');
+    console.log(
+      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n       node player/server.mjs --selftest',
+    );
     return;
   }
   if (opts.selftest) process.exit(await selftest());
 
-  const dir = path.resolve(opts.dir || '.');
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
-    console.error(`Project folder not found: ${dir}`);
+  let dir = path.resolve(opts.dir || '.');
+  let video = null;
+  if (isFile(dir)) {
+    // a video file: open it as a plain video; its folder is the project
+    if (!VIDEO_EXTS.includes(extOf(dir))) {
+      console.error(`Not a video MotionSnip Studio can play (${VIDEO_EXTS.join(', ')}): ${dir}`);
+      process.exit(2);
+    }
+    video = path.basename(dir);
+    dir = path.dirname(dir);
+  } else if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    console.error(`Project folder or video not found: ${dir}`);
     process.exit(2);
   }
-  if (!isFile(path.join(dir, 'reel.json'))) console.warn(`Note: no reel.json in ${dir} yet. The player will wait for it.`);
+  if (!video && !isFile(path.join(dir, 'reel.json'))) {
+    const found = pickVideo(dir);
+    if (found) console.log(`No reel.json in ${dir}: opening ${found} as a plain video.`);
+    else console.warn(`Note: no reel.json or video in ${dir} yet. The player will wait for one.`);
+  }
   if (opts.ffmpeg && !isExecutable(opts.ffmpeg)) console.warn(`Note: --ffmpeg ${opts.ffmpeg} is not an executable file.`);
 
-  const app = await startServer({ dir, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg });
+  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg });
   const stop = () => app.close().then(() => process.exit(0));
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);

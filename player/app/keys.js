@@ -5,6 +5,7 @@ import { toggle, stepFrames, stepSeconds, seek, duration, prevScene, nextScene, 
 import { editText, pinNote, cancelOverlay, isEditingText } from './overlay.js';
 import { describe } from './feedback.js';
 import { h, isTyping, toast } from './util.js';
+import { on as plainOn, onKey as plainKey, onKeyUp as plainKeyUp } from './vedit.js';
 
 export const SHORTCUTS = [
   ['Watching', [
@@ -31,9 +32,21 @@ export const SHORTCUTS = [
   ]],
 ];
 
+/** Shown too when a plain video is open. */
+const PLAIN_SHORTCUTS = ['Editing this video', [
+  ['I  O', 'Trim: start / end at the playhead'],
+  ['X  …  X', 'Cut out a part: press at its start, then at its end'],
+  ['T', 'Add text'],
+  ['Drag  /  drag a corner', 'Move / resize text, a logo or a blur'],
+  ['Double-click  or  Enter', 'Change the words'],
+  ['Delete', 'Remove the selected text, logo or blur'],
+  ['hold \\', 'See the original, without your edits'],
+  ['⌘Z  /  ⇧⌘Z', 'Undo / redo'],
+]];
+
 let sheet = null;
 
-const WORDS = new Set(['or', '/', 'hold', 'Drag', 'drag', 'a', 'corner', 'Click', 'Double-click', 'Right-click']);
+const WORDS = new Set(['or', '/', '…', 'hold', 'Drag', 'drag', 'a', 'corner', 'Click', 'Double-click', 'Right-click']);
 function keyTokens(k) {
   return k
     .split(/\s+/)
@@ -45,6 +58,7 @@ export function initKeys() {
   window.addEventListener('keydown', onKey);
   window.addEventListener('keyup', (e) => {
     if ((e.key === 'v' || e.key === 'V') && store.ui.compare) setCompare(false);
+    plainKeyUp(e);
   });
   window.addEventListener('blur', () => {
     if (store.ui.compare) setCompare(false);
@@ -61,7 +75,7 @@ export function toggleSheet(force) {
         h('div.dialog-head', h('h2', { id: 'keys-title' }, 'Shortcuts'), h('button.btn.btn-ghost.btn-xs', { type: 'button', 'aria-label': 'Close', onclick: () => sheet.close() }, '✕')),
         h(
           'div.keys-cols',
-          SHORTCUTS.map(([title, rows]) =>
+          (plainOn() ? [...SHORTCUTS, PLAIN_SHORTCUTS] : SHORTCUTS).map(([title, rows]) =>
             h('div.keys-col', h('h3', title), h('dl.keys', rows.map(([k, d]) => [h('dt', keyTokens(k)), h('dd', d)]))),
           ),
         ),
@@ -93,6 +107,11 @@ function onKey(e) {
     return;
   }
   const mod = e.metaKey || e.ctrlKey;
+  // a plain video's own edits (trim, layers...) get the key first; ⌘Z undoes whichever came last
+  if (plainKey(e)) {
+    e.preventDefault();
+    return;
+  }
   if (mod && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
     e.preventDefault();
     const c = undoLast();

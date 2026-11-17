@@ -39,6 +39,7 @@ import { startCheck, sendableCount, checkSummary } from './feedback.js';
 import { initExport, updateButton as updateExportButton } from './export.js';
 import { initFavicon, setFavicon } from './favicon.js';
 import { initKeys, toggleSheet } from './keys.js';
+import { initVedit, hint as plainHint, addLogoFile } from './vedit.js';
 import { h, icon, api, fmtTime, toast, debounce, clamp, prefersReducedMotion } from './util.js';
 
 const ui = {};
@@ -195,7 +196,13 @@ function build() {
   ui.hint = h('p.hint', { 'aria-live': 'polite' });
 
   ui.panel = h('aside.panel', { 'aria-label': 'Edit panel' });
-  ui.drop = h('div.drop-zone', { hidden: true }, h('div.drop-card', icon('music', 28), h('b', 'Drop to use as music'), h('span.small', 'mp3, wav or m4a')));
+  ui.drop = h(
+    'div.drop-zone',
+    { hidden: true },
+    store.reel?.plain
+      ? h('div.drop-card', icon('music', 28), h('b', 'Drop music, or a logo'), h('span.small', 'mp3, wav or m4a · png, jpg or webp'))
+      : h('div.drop-card', icon('music', 28), h('b', 'Drop to use as music'), h('span.small', 'mp3, wav or m4a')),
+  );
 
   const left = h('section.left', ui.stage, transport, ui.timeline, ui.hint);
   const layout = h('main.layout', left, ui.panel);
@@ -333,6 +340,8 @@ function hintText() {
   if (store.ui.editingText) return 'Type the new words · Enter saves · Esc cancels';
   if (store.ui.noteOpen) return 'Say what should change here · Enter saves · Esc closes';
   if (store.ui.compare) return `Showing v${player.prevTake?.version} at this frame · let go to come back`;
+  const ph = plainHint();
+  if (ph) return ph;
   if (isPlaying()) return 'Space pauses · click anything on the frame to stop and select it · right-click to circle a problem';
   const sel = store.ui.selected && getEl(store.ui.selected);
   if (sel) {
@@ -367,7 +376,8 @@ function parseHash() {
 
 function applyHash(first = false) {
   const p = parseHash();
-  if (p.tab && ['edit', 'script', 'look', 'sound', 'changes'].includes(p.tab)) setTab(p.tab);
+  const tabs = store.reel.plain ? ['edit', 'sound', 'changes'] : ['edit', 'script', 'look', 'sound', 'changes'];
+  if (p.tab && tabs.includes(p.tab)) setTab(p.tab);
   if (p.el && getEl(p.el)) {
     const el = getEl(p.el);
     if (!p.t) seek(el.t[0] + Math.min(0.4, (el.t[1] - el.t[0]) / 2));
@@ -479,7 +489,10 @@ function initDrop() {
     depth = 0;
     ui.drop.hidden = true;
     const f = e.dataTransfer.files?.[0];
-    if (f) uploadAudio(f);
+    if (!f) return;
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (store.reel?.plain && ['png', 'jpg', 'jpeg', 'webp'].includes(ext)) addLogoFile(f);
+    else uploadAudio(f);
   });
 }
 
@@ -534,6 +547,7 @@ async function boot() {
   initPlayback({ video: ui.video, music: ui.music, cmp: ui.cmp, liveHost: ui.liveHost, frameMsg: ui.frameMsg });
   initOverlay(ui.frame);
   initTimeline(ui.timeline);
+  initVedit(ui.frame);
   initPanel(ui.panel);
   initExport(ui.exportBtn);
   initKeys();
@@ -575,6 +589,8 @@ async function boot() {
     updateHint();
   });
   bus.on('fullscreen', toggleFullscreen);
+  bus.on('duration', fitFrame); // a plain video's real size arrives with its metadata
+  bus.on('vedit', updateHint);
   bus.on('changes', () => {
     updateHeader();
     updateHint();

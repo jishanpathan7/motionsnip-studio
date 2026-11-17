@@ -14,6 +14,7 @@ import {
   unsentChanges,
 } from './state.js';
 import { api, copyText, fmtTime, round, sameValue, sameBox, toast } from './util.js';
+import { hasEdits as plainEdits, summary as plainSummary } from './vedit.js';
 
 const q = (v) => {
   if (v == null) return 'none';
@@ -153,7 +154,8 @@ export function buildMarkdown(list = store.data.changes) {
   const reel = store.reel;
   const out = [];
   out.push(`MotionSnip Studio feedback for "${reel.title}" v${reel.version}`);
-  out.push(`Project: ${reel.path || '(unknown path)'} · ${reel.w}x${reel.h} · ${reel.fps} fps · ${round(reel.duration, 2)}s`);
+  if (reel.plain) out.push(`Video: ${reel.file || reel.src} (a plain video file, no reel.json) · ${reel.w}x${reel.h} · ${round(reel.duration, 2)}s`);
+  else out.push(`Project: ${reel.path || '(unknown path)'} · ${reel.w}x${reel.h} · ${reel.fps} fps · ${round(reel.duration, 2)}s`);
   if (reel.reference) out.push(`Reference: ${reel.reference}`);
 
   const ds = list.map((c) => ({ c, d: describe(c) }));
@@ -185,12 +187,19 @@ export function buildMarkdown(list = store.data.changes) {
     out.push('', `## Not quite from v${from}`);
     for (const x of nq) out.push(`- ${x.text}${x.reason ? ' — ' + x.reason : ''}`);
   }
-  out.push('', '## Scenes');
-  for (const s of reel.scenes) {
-    const st = sceneStatus(s.id);
-    out.push(`${s.id} ${s.name} (${fmtTime(s.t[0])}-${fmtTime(s.t[1])}): ${st === 'approved' ? 'approved' : st === 'changes' ? 'needs changes' : 'in review'}`);
+  if (reel.scenes.length) {
+    out.push('', '## Scenes');
+    for (const s of reel.scenes) {
+      const st = sceneStatus(s.id);
+      out.push(`${s.id} ${s.name} (${fmtTime(s.t[0])}-${fmtTime(s.t[1])}): ${st === 'approved' ? 'approved' : st === 'changes' ? 'needs changes' : 'in review'}`);
+    }
   }
-  out.push('', `Next version: set "version" to ${reel.version + 1} in reel.json.`);
+  if (reel.plain) {
+    if (plainEdits()) {
+      out.push('', `The reviewer is also editing this video in MotionSnip Studio (${plainSummary()}). Leave those to them: MotionSnip Studio applies them itself when it exports. Times above are in the original video.`);
+    }
+    out.push('', `Next version: this is a plain video file, not a MotionSnip project. Make the changes and export the new cut over the same file (${reel.src}); MotionSnip Studio counts that as v${reel.version + 1}.`);
+  } else out.push('', `Next version: set "version" to ${reel.version + 1} in reel.json.`);
   return out.join('\n') + '\n';
 }
 
