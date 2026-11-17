@@ -14,8 +14,15 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const copy = (from, to) => fs.cpSync(rel(from), path.join(OUT, to), { recursive: true });
 
+// Ship or Die hackathon traffic verification, on every public page (not in the local player)
+const VERIFY = '<script defer src="https://www.ship-or-die.com/hackathon/verify.js" data-site="698c29084368bb8c5bf2c5235134f1eef7911808"></script>';
+const withVerify = (html) => {
+  if (!html.includes('</head>')) throw new Error('page has no </head> for the verify script');
+  return html.replace('</head>', `${VERIFY}\n</head>`);
+};
+
 // landing page and its images
-copy('site/index.html', 'index.html');
+fs.writeFileSync(path.join(OUT, 'index.html'), withVerify(fs.readFileSync(rel('site/index.html'), 'utf8')));
 // the opening keyframe world
 copy('site/world.js', 'world.js');
 copy('site/world.css', 'world.css');
@@ -38,7 +45,7 @@ const demo = player
   .replace('<title>MotionSnip Studio</title>', '<title>MotionSnip Studio demo</title>')
   .replace(marker, `<script src="/demo-shim.js"></script>\n    ${marker}`);
 fs.mkdirSync(path.join(OUT, 'demo'), { recursive: true });
-fs.writeFileSync(path.join(OUT, 'demo', 'index.html'), demo);
+fs.writeFileSync(path.join(OUT, 'demo', 'index.html'), withVerify(demo));
 
 // demo project files, served where the player expects them (/p/*)
 for (const f of ['reel.json', 'video.mp4', 'music.mp3']) copy(`examples/demo/${f}`, `p/${f}`);
