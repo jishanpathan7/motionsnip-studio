@@ -1,5 +1,5 @@
-// Frames to pixels: an SVG frame (or any drawing on a canvas) → PNG bytes, for export. Web fonts don't load
-// inside an SVG drawn as an image, so the fonts it uses are fetched once and inlined as data URLs.
+// Frames to pixels: an SVG frame (or any drawing on a canvas) → pixels, for export. An SVG drawn as an image
+// loads nothing from outside, so the web fonts and pictures it uses are fetched once and inlined as data URLs.
 
 const FONT_CSS = {
   'Patrick Hand': 'https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap',
@@ -42,6 +42,31 @@ export async function inlineFonts(svg) {
   return css.join('\n');
 }
 
+const imageCache = new Map();
+const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+/** The SVG with every <image href> that isn't a data: URL inlined. A picture that fails to load is left as it is. */
+export async function inlineImages(svg) {
+  const hrefs = [...new Set([...svg.matchAll(/<image\b[^>]*?\shref="([^"]+)"/g)].map((m) => m[1]).filter((h) => !h.startsWith('data:')))];
+  if (!hrefs.length) return svg;
+  for (const href of hrefs) {
+    if (!imageCache.has(href))
+      imageCache.set(
+        href,
+        fetch(unesc(href))
+          .then((r) => (r.ok ? r.blob() : null))
+          .then((b) => (b ? toDataUrl(b) : null))
+          .catch(() => null),
+      );
+  }
+  let out = svg;
+  for (const href of hrefs) {
+    const data = await imageCache.get(href);
+    if (data) out = out.split(`href="${href}"`).join(`href="${data}"`);
+  }
+  return out;
+}
+
 /** A drawing surface for export frames at w×h. */
 export function createRaster(w, h) {
   const canvas = document.createElement('canvas');
@@ -49,10 +74,10 @@ export function createRaster(w, h) {
   canvas.height = h;
   const ctx = canvas.getContext('2d');
 
-  /** An SVG document string as a decoded image at w×h, with its web fonts inlined. */
+  /** An SVG document string as a decoded image at w×h, with its web fonts and pictures inlined. */
   async function svgImage(svg, iw = w, ih = h) {
     const fontCss = await inlineFonts(svg);
-    let s = svg.replace('width="100%" height="100%"', `width="${iw}" height="${ih}"`);
+    let s = (await inlineImages(svg)).replace('width="100%" height="100%"', `width="${iw}" height="${ih}"`);
     if (fontCss) s = s.replace(/<svg[^>]*>/, (m) => `${m}<style>${fontCss}</style>`);
     // a data: URL, not a blob: one: blob URLs load through the browser's network side, where they wait behind
     // the frame uploads of an export (hundreds of ms a frame)
