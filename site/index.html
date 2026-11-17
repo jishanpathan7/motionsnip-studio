@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <title>MotionSnip Studio</title>
-<meta name="description" content="Stop describing video fixes in paragraphs. Point at the exact moment and spot, and get back the version you meant. A free, local review player for videos Claude builds in code.">
+<meta name="description" content="Stop describing video fixes in paragraphs. Point at the exact moment and spot, and get back the version you meant. A free, local review player for videos Claude builds in code, and an editor for any video file.">
 <meta property="og:title" content="MotionSnip Studio">
 <meta property="og:description" content="Stop describing video fixes in paragraphs. Point at the exact moment and spot, and get back the version you meant.">
 <meta property="og:image" content="/og.png">
@@ -23,13 +23,13 @@
 :root{
   --bg:#15121d; --panel:#211c2b; --panel-2:#2a2436; --line:#2f2840; --line-2:#3e3552;
   --ink:#f6f4ef; --ink-2:#cfcad8; --mute:#a49db3;
-  --cue:#ff4fa8; --tape:#e8ff47; --tape-ink:#15121d;
+  --cue:#ff4fa8; --tape:#e8ff47; --tape-ink:#15121d; --sky:#6cc8ff;
   --sans:"Bricolage Grotesque",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
   --mono:"DM Mono","SF Mono",ui-monospace,Menlo,monospace;
 }
 @media (prefers-color-scheme: light){
   :root{--bg:#f6f4ef; --panel:#fff; --panel-2:#efece5; --line:#e4e0d7; --line-2:#cfcac0;
-    --ink:#15121d; --ink-2:#3a3446; --mute:#6a6378; --cue:#c2185b}
+    --ink:#15121d; --ink-2:#3a3446; --mute:#6a6378; --cue:#c2185b; --sky:#0277bd}
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -92,6 +92,30 @@ h2{font-weight:800;font-size:clamp(30px,4.4vw,46px);line-height:1.05;letter-spac
 .features h3{font-size:17px;font-weight:700;margin:0 0 6px}
 .features p{margin:0;color:var(--ink-2);font-size:15.5px}
 
+/* beyond review: four bigger cards, each with a small drawing */
+.more{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:36px}
+.more .card{display:flex;flex-direction:column;gap:0;padding:0;overflow:hidden}
+.more .art{height:132px;background:var(--panel-2);border-bottom:1px solid var(--line);display:grid;place-items:center;position:relative}
+.more .art svg{width:min(260px,80%);height:auto;overflow:visible}
+.more .body{padding:22px}
+.more .tag{font:500 12px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mute);margin:0 0 10px}
+.more .body p+p{margin-top:12px}
+.more code{font:400 14px/1.4 var(--mono);background:var(--panel-2);border-radius:6px;padding:2px 6px}
+.more .go{color:var(--ink);font-weight:600;font-size:15.5px;text-decoration:underline;text-decoration-color:var(--line-2);text-underline-offset:4px}
+.more .go:hover{text-decoration-color:var(--cue)}
+.more .go:focus-visible{outline:2px solid var(--cue);outline-offset:3px;border-radius:4px}
+.art .ln{fill:none;stroke:var(--ink-2);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.art .mute{fill:none;stroke:var(--line-2);stroke-width:2}
+.art .fillp{fill:var(--panel)}
+.art .cue{fill:none;stroke:var(--cue);stroke-width:2.4;stroke-linecap:round}
+.art .tape{fill:var(--tape);stroke:none}
+.art .sky{fill:none;stroke:var(--sky);stroke-width:2.2;stroke-dasharray:5 4;stroke-linecap:round}
+.art .skyf{fill:var(--sky)}
+.art .hatch{fill:url(#hatch)}
+.art text{font:600 11px var(--mono)}
+.art .lbl{fill:var(--mute)}
+.art .on-sky{fill:var(--bg)}
+
 .install{display:grid;grid-template-columns:5fr 7fr;gap:48px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:40px}
 .install h2{font-size:clamp(30px,3.4vw,40px);max-width:14ch}
 .install .sub{margin-top:14px}
@@ -119,6 +143,7 @@ footer a{color:var(--ink-2)}
 
 @media (max-width:900px){
   .problems,.features{grid-template-columns:1fr 1fr}
+  .more{grid-template-columns:1fr}
   .steps{grid-template-columns:1fr 1fr}
   .install{grid-template-columns:1fr;gap:32px;padding:28px}
   .install h2{max-width:20ch}
@@ -258,11 +283,11 @@ footer a{color:var(--ink-2)}
     <section id="how" aria-labelledby="how-h">
       <p class="kicker">How it works</p>
       <h2 id="how-h">Point, fix, send. Then check.</h2>
-      <p class="sub">MotionSnip Studio is a review player for videos built in code, such as a launch video Claude makes with Remotion. It reads a small <code>reel.json</code> that says what is on screen and when.</p>
+      <p class="sub">MotionSnip Studio is a review player for videos built in code, such as a launch video Claude makes with Remotion. It reads a small <code>reel.json</code> that says what is on screen and when. It also opens any video file, with no project at all.</p>
       <ol class="steps">
         <li>
           <h3>Watch</h3>
-          <p>The video opens in your browser, frame accurate, with scenes on the timeline.</p>
+          <p>The video opens in your browser, frame accurate, with scenes on the timeline. Anything Claude wasn’t sure about is already ringed.</p>
         </li>
         <li>
           <svg class="ring" viewBox="0 0 34 26" aria-hidden="true"><path d="M27 6.5C22 2 8 2.5 4.2 9.5 1 15.5 7 23 17 23c9.5 0 15-4.5 14.3-10.5C30.8 8 26 5 20 4.6"/></svg>
@@ -293,6 +318,88 @@ footer a{color:var(--ink-2)}
       </div>
     </section>
 
+    <section id="more" aria-labelledby="more-h">
+      <p class="kicker">Beyond review</p>
+      <h2 id="more-h">More than a review player.</h2>
+      <p class="sub">The same player edits any video file, checks Claude’s work before you see it, and turns one master into every shape you post.</p>
+      <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="none"/><line x1="0" y1="0" x2="0" y2="6" stroke="#ff4fa8" stroke-width="2.4" opacity=".55"/></pattern></defs></svg>
+      <div class="more">
+        <article class="card">
+          <div class="art" aria-hidden="true">
+            <svg viewBox="0 0 260 80">
+              <rect class="mute fillp" x="6" y="22" width="248" height="36" rx="7"/>
+              <rect class="hatch" x="104" y="23" width="44" height="34"/>
+              <path class="cue" d="M104 16v48M148 16v48"/>
+              <rect class="tape" x="20" y="18" width="6" height="44" rx="3"/>
+              <rect class="tape" x="230" y="18" width="6" height="44" rx="3"/>
+              <path class="ln" d="M36 40h56M160 40h60" stroke-dasharray="2 7"/>
+              <text class="lbl" x="104" y="76">cut</text><text class="lbl" x="14" y="12">trim</text>
+            </svg>
+          </div>
+          <div class="body">
+            <p class="tag">Any video</p>
+            <h3>Edit any video, not just Claude’s</h3>
+            <p>Open a screen recording or a phone clip. Trim it, cut parts out, add text, a logo or a blur, set the colour, and export a new cut. The original stays as it is.</p>
+            <p><code>server.mjs clip.mp4</code></p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="art" aria-hidden="true">
+            <svg viewBox="0 0 260 80">
+              <rect class="mute fillp" x="40" y="4" width="180" height="72" rx="6"/>
+              <path class="ln" d="M62 50h70M62 60h46"/>
+              <rect class="sky" x="140" y="16" width="64" height="26" rx="8"/>
+              <rect class="skyf" x="190" y="6" width="24" height="16" rx="5"/>
+              <text class="on-sky" x="195" y="18">C1</text>
+              <path class="cue" d="M64 22c-6-6 6-12 22-11s20 9 12 13-30 3-34-2"/>
+            </svg>
+          </div>
+          <div class="body">
+            <p class="tag">Self-review</p>
+            <h3>Claude checks its own render first</h3>
+            <p>Before you see v1, Claude looks over frames of its render for small text, typos, low contrast and things outside the safe area. Anything it isn’t sure about shows as a blue ring. Add it as your note, or dismiss it.</p>
+            <p><a class="go" href="/demo/">See the rings in the demo <span aria-hidden="true">→</span></a></p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="art" aria-hidden="true">
+            <svg viewBox="0 0 260 80">
+              <rect class="ln fillp" x="8" y="14" width="96" height="54" rx="5"/>
+              <rect class="ln fillp" x="124" y="4" width="42" height="74" rx="5"/>
+              <rect class="ln fillp" x="186" y="18" width="46" height="46" rx="5"/>
+              <path class="mute" d="M128 60h34M128 66h22"/>
+              <text class="lbl" x="44" y="10">16:9</text><text class="lbl" x="130" y="0">9:16</text><text class="lbl" x="198" y="76">1:1</text>
+            </svg>
+          </div>
+          <div class="body">
+            <p class="tag">Cutdowns</p>
+            <h3>Every shape from one master</h3>
+            <p>Make a 9:16, a 1:1 or a 6-second bumper from the master. Drag the crop window or let Auto guess, with safe areas for Reels, TikTok and Shorts. Each cutdown gets its own notes.</p>
+            <p><a class="go" href="/demo/">Open the cutdowns in the demo <span aria-hidden="true">→</span></a></p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="art" aria-hidden="true">
+            <svg viewBox="0 0 260 80">
+              <circle class="ln" cx="92" cy="24" r="9"/>
+              <path class="ln" d="M92 33c1 9-1 17 0 25M92 58c-4 6-7 10-10 16M92 58c3 6 6 10 9 16M92 40c-6 3-11 7-15 12M92 40c7 2 12 0 18-5"/>
+              <path class="ln" d="M120 8c26-3 50 0 52 9s-18 13-40 12l-9 9 1-10c-8-2-12-5-11-10s3-9 7-10"/>
+              <path class="mute" d="M132 16h26M132 22h16"/>
+              <rect class="ln fillp" x="186" y="40" width="30" height="24" rx="5"/>
+              <circle class="ln fillp" cx="192" cy="70" r="5"/><circle class="ln fillp" cx="210" cy="70" r="5"/>
+              <path class="ln" d="M201 40v-9"/><circle class="cue" cx="201" cy="28" r="3"/>
+              <path class="ln" d="M194 50h2M206 50h2"/>
+            </svg>
+          </div>
+          <div class="body">
+            <p class="tag">Animated scenes</p>
+            <h3>Hand-drawn scenes from a sentence</h3>
+            <p>Describe a scene and Claude writes it as data: people, robots, props, speech bubbles and camera moves. It plays and scrubs at once, and every line is yours to retype. Video export of scenes comes next.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <section id="install" aria-labelledby="inst">
       <div class="install">
         <div class="install-copy">
@@ -301,7 +408,7 @@ footer a{color:var(--ink-2)}
           <p class="sub">MotionSnip Studio is a skill for Claude Code. One clone sets it up.</p>
           <ul class="req">
             <li>Node 18 or newer</li>
-            <li>ffmpeg, only for exporting the final mp4</li>
+            <li>ffmpeg, for exports, cutdowns and editing a video file</li>
             <li>Everything stays on your computer</li>
           </ul>
           <a class="demo-link" href="/demo/">Want to see it first? Try the live&nbsp;demo&nbsp;<span aria-hidden="true">→</span></a>
@@ -319,6 +426,13 @@ footer a{color:var(--ink-2)}
             <div class="term">
               <div class="bar"><span>Claude Code</span><button class="copy" type="button" aria-label="Copy the example prompt" data-copy="Make a 30 second launch video for Acme.">Copy</button></div>
               <pre><span class="ln"><span class="p" aria-hidden="true">❯ </span>Make a 30 second launch video for Acme.</span></pre>
+            </div>
+          </li>
+          <li>
+            <p class="inst-head"><span class="n">3</span>Or open a video you already have</p>
+            <div class="term">
+              <div class="bar"><span>Terminal</span><button class="copy" type="button" aria-label="Copy the command that opens a video file" data-copy="node ~/.claude/skills/motionsnip-studio/player/server.mjs clip.mp4">Copy</button></div>
+              <pre><span class="ln">node ~/.claude/<wbr>skills/<wbr><span class="nw">motionsnip-studio/</span><wbr>player/<wbr><span class="nw">server.mjs \</span></span><span class="ln in">clip.mp4</span></pre>
             </div>
           </li>
         </ol>
