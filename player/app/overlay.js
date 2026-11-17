@@ -20,6 +20,11 @@ import {
   elHasEdits,
   findChange,
   setTab,
+  openFindings,
+  findingSpot,
+  findingNumber,
+  acceptFinding,
+  dismissFinding,
 } from './state.js';
 import { player, isPlaying, pause, toggle, currentTime, pushLiveBoxes, seek } from './video.js';
 import { h, svg, clamp, round, prefersReducedMotion, toast } from './util.js';
@@ -37,6 +42,9 @@ const ov = {
   lastPoint: null, // last pointer position over the frame, in %
   drag: null,
   justDrew: new Set(), // note ids whose ring should animate
+  spotsLayer: null, // Claude's self-review rings
+  spotPop: null,
+  spotOpen: null,
 };
 
 const RING_PATH = 'M71 13 C95 24 99 68 64 89 C33 105 3 80 6 49 C9 20 41 3 79 17';
@@ -45,7 +53,8 @@ export function initOverlay(frame) {
   ov.frame = frame;
   ov.boxes = h('div.ov-boxes');
   ov.notesLayer = h('div.ov-notes');
-  ov.layer = h('div.overlay', ov.boxes, ov.notesLayer);
+  ov.spotsLayer = h('div.ov-spots');
+  ov.layer = h('div.overlay', ov.boxes, ov.spotsLayer, ov.notesLayer);
   ov.cue = h('div.cue-dot', { 'aria-hidden': 'true' });
   frame.append(ov.layer, ov.cue);
 
@@ -105,9 +114,11 @@ export function render(force = false) {
   const t = currentTime();
   const vis = visibleEls(t).filter((el) => boxValue(el.id));
   const ns = notes().filter((n) => noteVisible(n, t));
+  const fs = store.ui.compare ? [] : openFindings().filter((f) => findingSpot(f) && findingVisible(f, t));
   const sig = [
     vis.map((e) => e.id).join(','),
     ns.map((n) => n.id).join(','),
+    fs.map((f) => f.id).join(',') + ':' + (ov.spotOpen || ''),
     store.ui.selected,
     isPlaying() ? 'p' : 's',
     store.ui.compare ? 'c' : '',
@@ -118,6 +129,108 @@ export function render(force = false) {
   if (ov.drag?.active) return; // the drag draws its own preview
   renderBoxes(vis);
   renderNotes(ns);
+  renderSpots(fs);
+}
+
+// ---------------------------------------------------------------- Claude's self-review rings
+
+function findingVisible(f, t) {
+  if (ov.spotOpen === f.id) return true;
+  return t >= f.t - 0.75 && t <= f.t + 2.5;
+}
+
+function renderSpots(fs) {
+  const frag = document.createDocumentFragment();
+  for (const f of fs) {
+    const spot = findingSpot(f);
+    const num = findingNumber(f.id);
+    const label = `Claude spotted C${num}: ${f.title}`;
+    // a box gets a ring stretched around it, with a little air; a point gets a ring the size of a note
+    const style = spot.box
+      ? { left: spot.box[0] - 1.4 + '%', top: spot.box[1] - 2.4 + '%', width: spot.box[2] + 2.8 + '%', height: spot.box[3] + 4.8 + '%' }
+      : { left: spot.x + '%', top: spot.y + '%' };
+    const node = h(
+      'button.ov-spot' + (spot.box ? '.is-box' : '') + (ov.spotOpen === f.id ? '.is-open' : ''),
+      { type: 'button', style, dataset: { spot: f.id }, title: label, 'aria-label': label },
+      // a box gets a dashed rounded rectangle (an ellipse that wide would cut through what it marks)
+      spot.box
+        ? svg('svg', { class: 'ov-spot-ring', 'aria-hidden': 'true' }, svg('rect', { x: '0', y: '0', width: '100%', height: '100%', rx: '10' }))
+        : svg('svg', { viewBox: '0 0 100 100', preserveAspectRatio: 'none', class: 'ov-spot-ring', 'aria-hidden': 'true' }, svg('path', { d: RING_PATH, pathLength: '1' })),
+      h('span.ov-spot-num', 'C' + num),
+    );
+    node.addEventListener('pointerdown', (e) => e.stopPropagation());
+    node.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openSpot(f.id);
+    });
+    frag.append(node);
+  }
+  ov.spotsLayer.replaceChildren(frag);
+}
+
+export function openSpot(id) {
+  const f = store.reel?.review.find((x) => x.id === id);
+  if (!f) return;
+  closeNote();
+  closeSpot(false);
+  if (isPlaying()) pause();
+  if (Math.abs(currentTime() - f.t) > 0.05) seek(f.t, { exact: true });
+  ov.spotOpen = id;
+  const num = findingNumber(id);
+  const spot = findingSpot(f) || { x: 50, y: 50 };
+  const accept = h('button.btn.btn-sm', { type: 'button' }, 'Add as my note');
+  const dismiss = h('button.btn.btn-ghost.btn-sm', { type: 'button' }, 'Dismiss');
+  const close = h('button.btn.btn-ghost.btn-xs.ov-spot-close', { type: 'button', 'aria-label': 'Close' }, '×');
+  ov.spotPop = h(
+    'div.ov-pop.ov-spot-pop',
+    { role: 'dialog', 'aria-label': `Claude spotted C${num}` },
+    h('div.ov-pop-head', h('span.ov-spot-badge', 'C' + num), h('span', 'Claude spotted' + (f.kind ? ' · ' + f.kind : '')), close),
+    h('p.ov-spot-title', f.title),
+    f.detail ? h('p.ov-spot-detail', f.detail) : null,
+    f.fix ? h('p.ov-spot-fix', h('b', 'Suggested fix: '), f.fix) : null,
+    h('div.ov-pop-actions', dismiss, accept),
+  );
+  for (const ev of ['pointerdown', 'dblclick', 'contextmenu']) ov.spotPop.addEventListener(ev, (e) => e.stopPropagation());
+  ov.spotPop.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSpot();
+    }
+  });
+  close.addEventListener('click', () => closeSpot());
+  dismiss.addEventListener('click', () => {
+    closeSpot(false);
+    dismissFinding(id);
+    toast(`Dismissed C${num}. Claude will hear it was not a problem.`);
+  });
+  accept.addEventListener('click', () => {
+    closeSpot(false);
+    const rec = acceptFinding(id);
+    if (rec) {
+      ov.justDrew.add(rec.id); // Claude's ring becomes the reviewer's own, drawn in
+      render(true);
+    }
+  });
+  render(true);
+  ov.layer.append(ov.spotPop);
+  const right = spot.x > 62;
+  const below = spot.y < 55;
+  const dx = spot.box ? spot.box[2] / 2 + 2 : 3;
+  ov.spotPop.style.left = right ? '' : `calc(${spot.x + dx}% + 12px)`;
+  ov.spotPop.style.right = right ? `calc(${100 - spot.x + dx}% + 12px)` : '';
+  ov.spotPop.style.top = below ? `calc(${spot.y}% - 18px)` : '';
+  ov.spotPop.style.bottom = below ? '' : `calc(${100 - spot.y}% - 18px)`;
+  accept.focus();
+}
+
+export function closeSpot(rerender = true) {
+  if (!ov.spotOpen) return false;
+  ov.spotOpen = null;
+  ov.spotPop?.remove();
+  ov.spotPop = null;
+  if (rerender) render(true);
+  return true;
 }
 
 function renderBoxes(vis) {
@@ -433,6 +546,7 @@ export function pinNote(x, y) {
 }
 
 export function openNote(id, fresh = false) {
+  closeSpot(false);
   if (store.ui.noteOpen && store.ui.noteOpen !== id) closeNote();
   const n = notes().find((x) => x.id === id);
   if (!n) return;
@@ -531,5 +645,6 @@ export function cancelOverlay() {
     return true;
   }
   if (closeNote()) return true;
+  if (closeSpot()) return true;
   return false;
 }

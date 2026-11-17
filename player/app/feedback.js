@@ -12,6 +12,7 @@ import {
   assetName,
   sceneAt,
   unsentChanges,
+  dismissedFindings,
 } from './state.js';
 import { api, copyText, fmtTime, round, sameValue, sameBox, toast } from './util.js';
 import { hasEdits as plainEdits, summary as plainSummary } from './vedit.js';
@@ -133,9 +134,9 @@ export function describe(c) {
       section: 'notes',
       at: c.t,
       sceneId: sc?.id,
-      line: `[${fmtTime(c.t)} · ${sc ? sc.id + ' ' + sc.name : '?'} · x ${round(c.x, 1).toFixed(1)}% y ${round(c.y, 1).toFixed(1)}%${on}] ${c.text ? c.text.replace(/\s*\n\s*/g, ' ') : '(circled, no comment)'}`,
+      line: `[${fmtTime(c.t)} · ${sc ? sc.id + ' ' + sc.name : '?'} · x ${round(c.x, 1).toFixed(1)}% y ${round(c.y, 1).toFixed(1)}%${on}] ${c.text ? c.text.replace(/\s*\n\s*/g, ' ') : '(circled, no comment)'}${c.review ? ` (from your self-review, ${c.review}; the reviewer agrees)` : ''}`,
       short: c.text || 'No comment yet',
-      detail: `${fmtTime(c.t)}${el ? ' · ' + el.label : ''}`,
+      detail: `${fmtTime(c.t)}${el ? ' · ' + el.label : ''}${c.review ? ' · spotted by Claude' : ''}`,
     };
   }
   return { section: 'other', at: null, line: `- ${c.kind}`, short: c.kind, detail: '' };
@@ -180,6 +181,12 @@ export function buildMarkdown(list = store.data.changes) {
     out.push('', '## Comments on the frame');
     const all = notes();
     for (const n of ns) out.push(`${all.indexOf(n) + 1 || ns.indexOf(n) + 1}. ${describe(n).line}`);
+  }
+  const gone = dismissedFindings();
+  if (gone.length) {
+    out.push('', '## Dismissed from your self-review');
+    out.push('The reviewer looked at these and is happy as it is. Leave them, and don\'t flag them again.');
+    for (const f of gone) out.push(`- ${f.id} [${fmtTime(f.t)}] ${f.title}`);
   }
   const nq = store.data.notQuite;
   if (nq.length) {

@@ -35,6 +35,7 @@ function emptyData() {
     notQuite: [],
     seenVersion: null,
     vedit: null, // a plain video's own edits (vedit.js)
+    review: {}, // Claude's self-review findings: "v<version>:<id>" -> 'accepted' | 'dismissed'
   };
 }
 
@@ -147,7 +148,39 @@ export function normalizeReel(raw) {
       };
     });
   if (!reel.duration) reel.duration = reel.scenes.length ? reel.scenes[reel.scenes.length - 1].t[1] : 0;
+  reel.review = normReview(r.review);
   return reel;
+}
+
+/**
+ * Claude's self-review: problems it spotted in its own render and left for the reviewer to decide.
+ * Each finding: { id, t, title, detail?, fix?, kind?, box?: [x, y, w, h] in % | x?, y? in % | elId? }.
+ */
+function normReview(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  return list
+    .filter((f) => f && typeof f === 'object' && (f.title || f.text))
+    .map((f, i) => {
+      let id = String(f.id || 'r' + (i + 1));
+      while (seen.has(id)) id += '_';
+      seen.add(id);
+      const box = normBox(f.box);
+      const x = box ? box[0] + box[2] / 2 : num(f.x, null);
+      const y = box ? box[1] + box[3] / 2 : num(f.y, null);
+      return {
+        id,
+        t: Math.max(0, num(f.t, 0)),
+        title: String(f.title || f.text),
+        detail: f.detail ? String(f.detail) : '',
+        fix: f.fix ? String(f.fix) : '',
+        kind: f.kind ? String(f.kind) : '',
+        box,
+        x: x == null ? null : clamp(x, 0, 100),
+        y: y == null ? null : clamp(y, 0, 100),
+        elId: f.elId ? String(f.elId) : null,
+      };
+    });
 }
 
 function guessType(p) {
@@ -238,6 +271,60 @@ export function mainTextKey(el) {
   if (!el) return null;
   for (const [k, p] of Object.entries(el.props)) if (p.type === 'text' || p.type === 'longtext') return k;
   return null;
+}
+
+// ---------------------------------------------------------------- Claude's self-review
+
+const reviewKey = (f) => `v${store.reel.version}:${f.id}`;
+
+/** Findings with a place on the frame: their own box or point, or their element's box. */
+export function findingSpot(f) {
+  const b = f.box || (f.elId && getEl(f.elId) ? boxValue(f.elId) : null);
+  if (b) return { box: b, x: b[0] + b[2] / 2, y: b[1] + b[3] / 2 };
+  if (f.x != null && f.y != null) return { box: null, x: f.x, y: f.y };
+  return null;
+}
+
+export function findingState(f) {
+  return store.data.review[reviewKey(f)] || 'open';
+}
+
+/** Findings the reviewer hasn't accepted or dismissed yet. */
+export function openFindings() {
+  return store.reel ? store.reel.review.filter((f) => findingState(f) === 'open') : [];
+}
+
+export function dismissedFindings() {
+  return store.reel ? store.reel.review.filter((f) => findingState(f) === 'dismissed') : [];
+}
+
+export function findingNumber(id) {
+  return store.reel.review.findIndex((f) => f.id === id) + 1;
+}
+
+/** Accepting turns the finding into one of the reviewer's own notes. */
+export function acceptFinding(id) {
+  const f = store.reel.review.find((x) => x.id === id);
+  if (!f) return null;
+  const spot = findingSpot(f) || { x: 50, y: 50 };
+  const text = f.fix ? `${f.title}. ${f.fix}` : f.title;
+  store.data.review[reviewKey(f)] = 'accepted';
+  const rec = addNote({ t: f.t, x: spot.x, y: spot.y, elId: f.elId, text, review: f.id });
+  return rec;
+}
+
+export function dismissFinding(id) {
+  const f = store.reel.review.find((x) => x.id === id);
+  if (!f) return;
+  store.data.review[reviewKey(f)] = 'dismissed';
+  changed({ review: id });
+}
+
+export function restoreFinding(id) {
+  const f = store.reel.review.find((x) => x.id === id);
+  if (!f) return;
+  delete store.data.review[reviewKey(f)];
+  changed({ review: id });
 }
 
 export function notes() {
@@ -352,10 +439,11 @@ export function setFont(id, v) {
   changed({ key: ck, brand: true });
 }
 
-export function addNote({ t, x, y, elId, text = '' }) {
+export function addNote({ t, x, y, elId, text = '', review = null }) {
   const id = newId('n');
   const scene = sceneAt(t);
   const rec = { kind: 'note', key: `note:${id}`, id, t, x, y, elId: elId || null, sceneId: scene?.id || null, text };
+  if (review) rec.review = review; // accepted from Claude's self-review
   store.data.changes.push({ ...rec, createdAt: Date.now(), sent: null });
   changed({ key: rec.key, note: id, added: true });
   return rec;
@@ -387,6 +475,8 @@ export function undo(key) {
     store.data.uploads = store.data.uploads.filter((u) => u.id !== c.asset.id);
     if (audioValue('music') === c.asset.id) remove('audio:music');
   }
+  // undoing an accepted finding puts it back up for review
+  if (c.kind === 'note' && c.review && store.reel) delete store.data.review[`v${store.reel.version}:${c.review}`];
   changed({ key, undone: true, elId: c.elId, note: c.kind === 'note' ? c.id : undefined });
   return true;
 }
@@ -462,6 +552,7 @@ function sanitizeData(d) {
     status: d.status && typeof d.status === 'object' ? d.status : {},
     uploads: Array.isArray(d.uploads) ? d.uploads.filter((u) => u && u.id) : [],
     notQuite: Array.isArray(d.notQuite) ? d.notQuite : [],
+    review: d.review && typeof d.review === 'object' && !Array.isArray(d.review) ? d.review : {},
   };
 }
 
