@@ -33,12 +33,15 @@ import {
   acceptFinding,
   dismissFinding,
   restoreFinding,
+  setRequest,
+  requestText,
 } from './state.js';
 import { seek, currentTime, player, duration } from './video.js';
 import { pinNote, openNote, editText, openSpot, render as renderOverlay } from './overlay.js';
-import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount } from './feedback.js';
+import { describe, buildMarkdown, send, setVerdict, finishCheck, checkSummary, sendableCount, sceneApplicable, applySceneNow } from './feedback.js';
 import { h, icon, fmtTime, round, clamp, projectUrl, toast, copyText, baseName } from './util.js';
 import { on as plainOn, renderPane as renderPlainEdit } from './vedit.js';
+import { inspector as trackInspector, selectedClipId } from './tracks.js';
 import { goToOutput } from './outputs.js';
 
 const TABS = [
@@ -96,8 +99,11 @@ export function initPanel(root) {
   bus.on('check', () => render(true));
   bus.on('pending', () => render(true));
   bus.on('music', () => store.ui.tab === 'sound' && render());
-  bus.on('time', () => {
-    if (store.ui.tab === 'edit' && !store.ui.selected) {
+  // the timeline editor changed a clip, or the playhead moved over the selected one (its keyframe values)
+  bus.on('tracks', () => store.ui.tab === 'edit' && render());
+  bus.on('time', (d) => {
+    if (store.ui.tab === 'edit' && d?.seek && selectedClipId()) return render();
+    if (store.ui.tab === 'edit' && !store.ui.selected && !selectedClipId()) {
       const sc = sceneAt(currentTime());
       if (sc && sc.id !== pn.sceneShown) render();
     }
@@ -211,7 +217,11 @@ function renderEdit() {
   if (plainOn()) return renderPlainEdit();
   const id = store.ui.selected;
   const el = id && getEl(id);
-  if (!el) return renderSceneOverview();
+  if (!el) {
+    // a timeline clip that is not on the frame (a sound, or one just added)
+    const ins = trackInspector(null);
+    return ins ? h('div.edit', h('div.el-head', h('div.el-title', h('h2', 'Clip'))), ins) : renderSceneOverview();
+  }
   const scene = sceneOfEl(el.id);
   const wrap = h('div.edit');
   const onScreen = currentTime() >= el.t[0] && currentTime() <= el.t[1];
@@ -246,6 +256,8 @@ function renderEdit() {
   const keys = Object.keys(el.props);
   if (!keys.length) wrap.append(h('p.muted', 'Nothing to edit here. Right-click the frame (or press C) to leave a note.'));
   for (const k of keys) wrap.append(propField(el, k, el.props[k]));
+  const ins = trackInspector(el);
+  if (ins) wrap.append(ins);
   wrap.append(section('Scene', h('div.scene-line', h('b', `${scene.id} ${scene.name}`), ' ', h('span.mono.muted', `${fmtTime(scene.t[0])}–${fmtTime(scene.t[1])}`)), statusControl(scene)));
   return wrap;
 }
@@ -832,6 +844,8 @@ function renderChanges() {
     );
   }
 
+  if (!reel.derived) wrap.append(describeBox());
+
   const spotted = renderSpotted();
   if (spotted) wrap.append(spotted);
 
@@ -945,6 +959,27 @@ function renderChanges() {
     );
   }
 
+  if (requestText()) any = true;
+
+  // a scene's edits can be written into scene.json right here; notes and moved boxes still need Claude
+  const app = sceneApplicable();
+  if (app.keys.length) {
+    const btn = h(
+      'button.btn.btn-sm',
+      {
+        type: 'button',
+        onclick: async () => {
+          btn.disabled = true;
+          await applySceneNow();
+          btn.disabled = false;
+        },
+      },
+      icon('check', 15),
+      `Apply ${app.keys.length} edit${app.keys.length === 1 ? '' : 's'} now`,
+    );
+    wrap.append(h('div.apply-now', btn, h('p.small.muted', `Writes ${app.keys.length === 1 ? 'it' : 'them'} into scene.json as v${store.master.version + 1}, without Claude. Notes and moved things still go to Claude.`)));
+  }
+
   // Send area
   const unsent = unsentChanges().length + nq.length;
   const counts = countsLine();
@@ -972,6 +1007,20 @@ function renderChanges() {
   );
   wrap.append(preview);
   return wrap;
+}
+
+/** Ask Claude for something new, in words: it goes into the feedback file as "New request". */
+function describeBox() {
+  const ta = h('textarea.input.describe-input', {
+    rows: 3,
+    'aria-label': 'Ask Claude for something new',
+    placeholder: store.master.timeline
+      ? 'Describe a new video or part: "a 20 s launch teaser: a stuck developer, then our app saves the day, with captions and upbeat music"'
+      : 'Describe something new for Claude to make or change',
+  });
+  ta.value = requestText();
+  ta.addEventListener('input', () => setRequest(ta.value));
+  return section('Ask for something new', ta, h('p.small.muted.describe-help', 'Goes to Claude with Send, with your edits and notes.'));
 }
 
 /** Claude's self-review: what it spotted in its own render, for the reviewer to accept or dismiss. */

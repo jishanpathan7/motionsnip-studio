@@ -266,9 +266,16 @@ function changed(detail) {
   bus.emit('changes', detail || {});
 }
 
+/**
+ * Direct edits: a timeline project saves prop and box edits into its files at once instead of collecting them
+ * for Claude. Each hook returns true when it took the edit. Set by tracks.js.
+ */
+export const editHooks = { prop: null, box: null };
+
 export function setProp(elId, key, value, at) {
   const el = getEl(elId);
   if (!el || !el.props[key]) return;
+  if (editHooks.prop?.(el, key, value)) return;
   const before = el.props[key].v;
   const ck = `prop:${elId}:${key}`;
   if (sameValue(before, value)) remove(ck);
@@ -286,6 +293,7 @@ export function setBox(elId, box) {
   if (!el || !el.box) return;
   const ck = `box:${elId}`;
   const nb = box.map((v) => Math.round(v * 10) / 10);
+  if (editHooks.box?.(el, nb)) return;
   if (sameBox(el.box, nb, 0.05)) remove(ck);
   else {
     const scale = Math.round(Math.sqrt((nb[2] * nb[3]) / Math.max(1e-6, el.box[2] * el.box[3])) * 100) / 100;
@@ -300,6 +308,28 @@ export function setAudio(field, value) {
   if (sameValue(before ?? null, value ?? null)) remove(ck);
   else upsert({ kind: 'audio', key: ck, field, before: before ?? null, after: value ?? null });
   changed({ key: ck, audio: true });
+}
+
+/** The Describe box: a new request for Claude, in words. One unsent request at a time; a sent one stays for Check. */
+export function setRequest(text) {
+  const t = String(text || '');
+  const cur = store.data.changes.find((c) => c.kind === 'request' && !c.sent);
+  if (!t.trim()) {
+    if (cur) remove(cur.key);
+  } else if (cur) {
+    cur.text = t;
+    cur.updatedAt = Date.now();
+  } else store.data.changes.push({ kind: 'request', key: `request:${Date.now()}`, id: newId(), text: t, createdAt: Date.now(), updatedAt: Date.now(), sent: null });
+  changed({ key: 'request', request: true });
+}
+
+/** The unsent request's words, or ''. */
+export const requestText = () => store.data.changes.find((c) => c.kind === 'request' && !c.sent)?.text || '';
+
+/** Drop changes by key without the undo side effects (they were applied to the files). */
+export function dropChanges(keys) {
+  for (const k of keys) remove(k);
+  changed({ applied: true });
 }
 
 export function setBrandColor(id, v) {

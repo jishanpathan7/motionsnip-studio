@@ -2,6 +2,7 @@
 // scrubbing and hover thumbnails. Waveforms are decoded with Web Audio and drawn as bars.
 // For a plain video, vedit.js draws trim, cuts and a layers lane into the parts timelineParts() hands it.
 
+import { initTracks, loadTracks } from './tracks.js';
 import { store, bus, effectiveAudio, setAudio, sceneStatus, notes, elHasEdits, getEl, sceneAt, findChange, assetName } from './state.js';
 import { player, duration, seek, currentTime, isPlaying, pause, play } from './video.js';
 import { h, clamp, cssVar, fmtTime, projectUrl, round } from './util.js';
@@ -82,7 +83,10 @@ export function initTimeline(host) {
   tl.tipText = h('div.tl-tip-text');
   tl.tip = h('div.tl-tip', { hidden: true }, tl.tipCanvas, tl.tipText);
 
-  host.append(labels, tl.area, tl.tip);
+  tl.labels = labels;
+  tl.tracksHost = h('div.trk-host', { hidden: true });
+  host.append(labels, tl.area, tl.tip, tl.tracksHost);
+  initTracks(tl.tracksHost);
 
   tl.thumb = h('video', { muted: true, preload: 'auto', playsInline: true, 'aria-hidden': 'true' });
   tl.thumb.muted = true;
@@ -124,6 +128,12 @@ export function timelineParts() {
 
 export function loadTimeline() {
   const reel = store.reel;
+  // a timeline project gets the multi-track editor in place of the review lanes
+  const tracks = !!reel.timeline && !reel.derived;
+  tl.labels.hidden = tracks;
+  tl.area.hidden = tracks;
+  tl.root.classList.toggle('has-tracks', tracks);
+  loadTracks();
   tl.fxLabel.textContent = reel.plain ? 'Video sound' : reel.audio.videoAudio === 'mix' ? 'Video sound' : 'Effects';
   tl.scenesLabel.textContent = reel.plain ? 'Edit' : 'Scenes';
   if (reel.src) {

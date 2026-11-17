@@ -113,7 +113,22 @@ Describe a scene in words and Claude makes it: hand-drawn people and robots, pro
 node player/server.mjs examples/scene-demo
 ```
 
-Video export of scenes comes next; for now a scene plays live in the player.
+**Export** draws every frame of a scene to MP4, HEVC, ProRes, WebM or GIF. Changed words or colours can go straight into `scene.json` with **Apply** in Changes, as the next version, without Claude.
+
+## Timeline projects
+
+For a whole video (footage, illustrated scenes, titles, music and captions together), Claude writes `timeline.json` and you get a real editor beside the review tools:
+
+- **Tracks and clips.** Video, scene, graphics, audio and captions tracks with mute, solo, hide and lock. Drag a clip to move it (onto another track too), drag an edge to trim, Alt-drag to slip, `S` to split at the playhead, `Delete` (Shift closes the gap), zoom with ⌘-scroll. Clips snap to the playhead, other clips and markers.
+- **Make things.** Add text (with animation presets like pop, type-on and word-stagger), shapes, captions and scene clips, or drop videos, pictures and sounds from Finder onto a track.
+- **Animate.** In the Edit tab: transitions in and out (fade, wipe, slide, zoom), keyframes for position, scale, rotation and opacity at the playhead, volume and fades, colour look, text style.
+- **Undo and redo** everything. Every edit is saved into `timeline.json` at once, so Claude works on exactly what you see; if Claude changes the file while you watch, the editor picks it up.
+- **Ask for something new** in the Changes tab ("a 20 s teaser: a stuck developer, then our app saves the day, with captions"): it goes to Claude with Send.
+- **Export** with sound to MP4, HEVC, ProRes, WebM or GIF at 720p to 4K and 24 to 60 fps, captions drawn in or saved as `.srt` and `.vtt`. Make 9:16, 1:1 and bumper versions from it with Cutdown.
+
+```bash
+node player/server.mjs examples/timeline-demo
+```
 
 ## Player controls
 
@@ -257,14 +272,17 @@ Install it (`brew install ffmpeg` on macOS), or start the server with `--ffmpeg 
 ```
 SKILL.md              the Claude Code skill
 player/server.mjs     the local server (Node 18+, no dependencies)
-player/lib/           server helpers (cutdowns)
+player/lib/           server helpers (cutdowns, frame export)
 player/index.html     the player page
 player/app/           the player's scripts and styles
 player/app/scene/     the scene compiler and hand-drawn renderer (no dependencies)
+player/app/comp/      the timeline model, edit operations, compositor and frame export
+player/app/tracks.js  the multi-track timeline editor
 docs/SPEC.md          the full product spec
 docs/brand/           logo, favicons and the brand guide
 examples/demo/        a small example project (synthetic video and music)
 examples/scene-demo/  a scene project: scene.json drawn live
+examples/timeline-demo/ a timeline project: footage, a scene, titles, music and captions
 ```
 
 ## Licence

@@ -161,7 +161,8 @@ export function loadReel({ keepTime = false, startAt = null } = {}) {
   if (wasPlaying) pause();
   player.videoOk = false;
   const v = player.video;
-  if (reel.src) {
+  // a timeline plays its own media; its last export is only for takes, compare and cutdowns
+  if (reel.src && !reel.timeline) {
     v.src = projectUrl(reel.src) + `?v=${reel.version}`;
     v.load();
     const onMeta = () => {
@@ -174,7 +175,7 @@ export function loadReel({ keepTime = false, startAt = null } = {}) {
     v.removeAttribute('src');
     v.load();
     // a scene draws itself; it has a video only once it's been exported
-    player.frameMsg.hidden = !!reel.scene;
+    player.frameMsg.hidden = !!(reel.scene || reel.timeline);
     player.frameMsg.textContent = 'reel.json has no "src" video yet.';
   }
   player._virtual.t = t;
@@ -183,8 +184,7 @@ export function loadReel({ keepTime = false, startAt = null } = {}) {
   if (reel.live) loadLive(reel.live, reel.version);
   else if (player.live || document.body.classList.contains('has-live')) {
     // a cutdown is a plain video file: leave the master's live scene
-    player.live = null;
-    player.liveHost.innerHTML = '';
+    dropLive();
     document.body.classList.remove('has-live');
   }
   loadTakes();
@@ -359,6 +359,7 @@ export function setLoop(on) {
 export function setMuted(on) {
   player.muted = on;
   applyGains(true);
+  if (player.live) safeLive('setMuted', on);
   bus.emit('mute', { on });
 }
 
@@ -494,10 +495,19 @@ function syncCompare() {
 
 // ---------------------------------------------------------------- live renderer
 
+function dropLive() {
+  try {
+    player.live?.destroy?.();
+  } catch (e) {
+    console.warn('[motionsnip] live.destroy failed:', e.message);
+  }
+  player.live = null;
+  player.liveHost.innerHTML = '';
+}
+
 function loadLive(live, version) {
   const host = player.liveHost;
-  host.innerHTML = '';
-  player.live = null;
+  dropLive();
   const token = (player._liveToken = (player._liveToken || 0) + 1);
   const started = (api) => {
     if (token !== player._liveToken) return;
@@ -506,6 +516,7 @@ function loadLive(live, version) {
     document.body.classList.add('has-live');
     player.frameMsg.hidden = true;
     safeLive('setRate', player.rate);
+    safeLive('setMuted', player.muted);
     safeLive('seek', currentTime());
     pushLiveBoxes();
     pushLiveProps();
@@ -518,6 +529,23 @@ function loadLive(live, version) {
     toast(`Live renderer didn't start: ${msg}. Showing the video.`);
     document.body.classList.remove('has-live');
   };
+
+  // a timeline project: timeline.json composed by MotionSnip's own compositor, with the scenes its clips use
+  if (live && typeof live === 'object' && live.type === 'timeline') {
+    const json = (rel) =>
+      fetch(projectUrl(rel) + `?v=${version}&r=${Date.now()}`).then((r) => {
+        if (!r.ok) throw new Error(`${rel} returned ${r.status}`);
+        return r.json();
+      });
+    Promise.all([json(live.spec || 'timeline.json'), import('./comp/runtime.js')])
+      .then(async ([raw, mod]) => {
+        const scenes = await timelineScenes(raw, json);
+        if (token !== player._liveToken) return;
+        started(mod.createTimeline(host, raw, { scenes, asset: (p) => projectUrl(p) }));
+      })
+      .catch((e) => failed(e.message));
+    return;
+  }
 
   // a scene project: scene.json drawn by MotionSnip's own scene runtime (no project code runs)
   if (live && typeof live === 'object' && live.type === 'scene') {
@@ -554,6 +582,40 @@ function loadLive(live, version) {
   document.head.append(s);
 }
 
+/** Read timeline.json and its scenes again and hand them to the running compositor (same version, new content). */
+export async function reloadLiveTimeline() {
+  const l = player.live;
+  const live = store.reel?.live;
+  if (!l || typeof l.load !== 'function' || live?.type !== 'timeline') return;
+  const json = (rel) =>
+    fetch(projectUrl(rel) + `?r=${Date.now()}`).then((r) => {
+      if (!r.ok) throw new Error(`${rel} returned ${r.status}`);
+      return r.json();
+    });
+  try {
+    const raw = await json(live.spec || 'timeline.json');
+    const scenes = await timelineScenes(raw, json);
+    if (player.live === l) l.load(raw, scenes);
+  } catch (e) {
+    console.warn('[motionsnip] timeline reload:', e.message);
+  }
+}
+
+/** The scene files a timeline's scene clips use, read from the project: { 'scene.json': raw }. */
+export async function timelineScenes(raw, json) {
+  const files = new Set();
+  for (const t of Array.isArray(raw?.tracks) ? raw.tracks : []) if (t?.kind === 'scene') for (const c of t.clips || []) files.add(typeof c?.scene === 'string' && c.scene ? c.scene : 'scene.json');
+  const out = {};
+  for (const f of files) {
+    try {
+      out[f] = await json(f);
+    } catch (e) {
+      console.warn('[motionsnip] scene for the timeline:', e.message);
+    }
+  }
+  return out;
+}
+
 function safeLive(fn, arg) {
   const l = player.live;
   if (!l || typeof l[fn] !== 'function') return;
@@ -577,8 +639,8 @@ export function pushLiveProps() {
   for (const c of store.data.changes) {
     if (c.kind === 'prop') {
       (edits[c.elId] ||= {})[c.propKey] = c.after;
-      const path = els.get(c.elId)?.props?.[c.propKey]?.path;
-      if (path) patches.push({ path, value: c.after });
+      const prop = els.get(c.elId)?.props?.[c.propKey];
+      if (prop?.path) patches.push(prop.file ? { path: prop.path, value: c.after, file: prop.file } : { path: prop.path, value: c.after });
     } else if (c.kind === 'brand' && store.reel.scene) patches.push({ path: `style.palette.${c.colorId}`, value: c.after });
   }
   try {

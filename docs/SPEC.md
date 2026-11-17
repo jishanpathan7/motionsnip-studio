@@ -120,10 +120,22 @@ node player/server.mjs --selftest
   Content types for html/js/css/json/mp4/webm/mov/mp3/wav/m4a/aac/ogg/png/jpg/webp/gif/svg.
 - `GET /api/reel` → reel.json (parsed and re-serialised; 500 with a short message if invalid).
 - `GET /api/state` / `POST /api/state` (JSON body ≤ 2 MB) → read/write `.motionsnip/state.json`.
-- `POST /api/upload?name=<file name>` (raw body) → audio uploads only: mp3/wav/m4a; first bytes must match the type
-  (ID3 or MPEG frame sync for mp3, `RIFF....WAVE` for wav, `....ftyp` for m4a); ≤ 100 MB; the name is reduced to
+- `POST /api/upload?name=<file name>` (raw body) → audio (mp3/wav/m4a), images (png/jpg/webp/svg) and video
+  (mp4/mov/webm, ≤ 4 GB, streamed to disk); first bytes must match the type
+  (ID3 or MPEG frame sync for mp3, `RIFF....WAVE` for wav, `....ftyp` for m4a and mp4/mov, EBML for webm); ≤ 100 MB otherwise; the name is reduced to
   letters, digits, `-`, `_`, `.` (no leading dot, no path parts, max 80 chars, keep the extension); never overwrite
-  (append `-2`, `-3`…). Saves to `assets/`. Responds `{ id: "assets/<name>", name, type: "audio" }`.
+  (append `-2`, `-3`…). Saves to `assets/`. Responds `{ id: "assets/<name>", name, type: "audio" | "image" | "video" }`.
+- `GET /api/formats` → which export formats this ffmpeg can make (`mp4`, `hevc`, `prores`, `webm`, `gif`).
+- Frame export (scene and timeline projects; the browser draws, ffmpeg encodes): `POST /api/frames-start`
+  `{ w, h, fps, frames, format, audio: [{ src, at, in, out, gain, fadeIn, fadeOut }], setSrc, captions }` → `{ job }`;
+  `POST /api/frames-push?job=` with PNGs back to back; `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
+  time, abandoned after 20 s without frames. Audio clips are mixed by ffmpeg (clips with no sound track are skipped).
+  `setSrc` makes the export the project's video; `captions` writes `<export>.srt` and `.vtt` from the timeline's captions.
+- `POST /api/project-apply` `{ file, base?, bump?, patches? | ops? | content? }` → writes `timeline.json`, `scene.json` or
+  a scene file the timeline uses: `patches` `[{ path, value }]` only at editable paths, `ops` (timeline edit operations,
+  `comp/ops.mjs`) or the whole `content`. `base` is the file's `rev` (short sha1 of its text) the edit started from; a
+  mismatch is 409 `{ error, rev }`. `bump` adds 1 to `version` (Apply without Claude); hand edits save in place.
+  Responds `{ ok, rev, version }`.
 - `POST /api/feedback` `{ version, markdown }` → writes `.motionsnip/feedback-v<version>.md`, responds `{ path }` (absolute).
 - `POST /api/export` `{ music, musicVol, sfxVol, musicOffset, musicFade, mode: "mix" | "render", props }` → starts one job
   at a time; `GET /api/export` → `{ state: idle|running|done|error, pct, line, out }`.
@@ -218,6 +230,11 @@ Responsive: panel moves under the frame below ~1100 px wide.
 MotionSnip Studio feedback for "<title>" v<version>
 Project: <path> · <w>x<h> · <fps> fps · <duration>s
 
+## New request
+<one line on where to build it>
+
+<the reviewer's words from the Describe box>
+
 ## Exact changes
 - [<mm:ss.s> · <scene id> · <element label>] <prop label> (<src>): "<before>" -> "<after>"
 - [<mm:ss.s> · <scene id> · <element label>] Size and position (<src>): [x, y, w, h] -> [x, y, w, h] (scale 1.12)
@@ -251,7 +268,7 @@ The reviewer looked at these and is happy as it is. Leave them, and don't flag t
 ## Scenes
 S1 <name> (<mm:ss.s>-<mm:ss.s>): approved | in review | needs changes
 
-Next version: set "version" to <N+1> in reel.json.
+Next version: set "version" to <N+1> in reel.json (scene.json or timeline.json for those projects).
 ```
 
 ## 6. Live renderer (optional)
@@ -278,6 +295,26 @@ takes `setProps(edits, patches)`: edits are `{ elId: { prop: value } }`, patches
 The player sends both on every change, so Script and Look edits show at once. A moved box becomes an offset of that
 thing in that shot. Drawing is pure: `frameSVG(spec, t)` (`draw.mjs`) returns the same SVG for the same `t`.
 Feedback lines for a scene name scene.json paths and pixel moves, and "Next version" points at scene.json.
+**Apply** in Changes writes prop and colour edits into scene.json through `/api/project-apply` with `bump`.
+
+## 6b. Timeline projects
+
+A folder with `timeline.json` (format in SKILL.md section 11) is a timeline project; `readReel` checks for it before
+`scene.json`. `player/app/comp/timeline.mjs` is shared by the server and the browser:
+
+- `normTimeline` fills defaults and ids; `toReel` builds the reel: markers (or the video and scene clips in time order,
+  with gaps) become `scenes`, clips become elements with props that carry their `timeline.json` path, a scene clip's
+  elements come in as `<clip>/<element>` with `prop.file`, and `review` is the timeline's own lint (gaps, overlaps on
+  video and scene tracks, missing files, captions too fast to read or at the same time, text too small or off frame).
+  `live` is `{ "type": "timeline", "spec": "timeline.json" }`, `timeline: true`; the reel `rev` is the file's sha1 and
+  `depsRev` covers its scene files.
+- `comp/ops.mjs` holds the pure edit operations (`add`, `remove` with ripple, `move`, `trim`, `split`, `slip`, `set`,
+  `key`/`unkey`, track and marker operations, `meta`); locked tracks refuse them. Undo is the previous state.
+- `comp/runtime.js` is the live renderer: pooled `<video>`s with CSS transforms, scene SVG, canvas graphics and captions,
+  backdrop-filter blur, WebAudio gain per clip, plus `renderFrame(raster, t)` and `exportAudio()` for export.
+- `tracks.js` is the editor. Each edit is shown at once and saved with `project-apply` `{ file, base, content }`; a
+  change from outside is reloaded when nothing is unsaved, and a 409 reloads with a message. Element prop and box
+  edits on a timeline save into the files through `editHooks` instead of becoming changes for Claude.
 
 ## 7. Brand (see docs/brand/README.md)
 

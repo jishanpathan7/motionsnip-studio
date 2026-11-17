@@ -6,6 +6,7 @@ import { editText, pinNote, cancelOverlay, isEditingText } from './overlay.js';
 import { describe } from './feedback.js';
 import { h, isTyping, toast } from './util.js';
 import { on as plainOn, onKey as plainKey, onKeyUp as plainKeyUp } from './vedit.js';
+import { tracksKey, tracksOn } from './tracks.js';
 
 export const SHORTCUTS = [
   ['Watching', [
@@ -44,9 +45,23 @@ const PLAIN_SHORTCUTS = ['Editing this video', [
   ['⌘Z  /  ⇧⌘Z', 'Undo / redo'],
 ]];
 
+/** Shown too when a timeline project is open. */
+const TRACK_SHORTCUTS = ['Editing the timeline', [
+  ['S', 'Split the clip at the playhead'],
+  ['Delete  /  Shift Delete', 'Remove the clip / and close the gap'],
+  ['Drag  /  drag an edge', 'Move a clip (onto another track too) / trim it'],
+  ['Alt drag', 'Slip: change what part of the source plays'],
+  ['Shift drag', 'No snapping'],
+  ['Alt ← →', 'Nudge the clip one frame (Shift: 10)'],
+  ['⌘D', 'Duplicate the clip'],
+  ['T  /  B', 'Add text / a marker at the playhead'],
+  ['⌘ scroll', 'Zoom the timeline'],
+  ['⌘Z  /  ⇧⌘Z', 'Undo / redo'],
+]];
+
 let sheet = null;
 
-const WORDS = new Set(['or', '/', '…', 'hold', 'Drag', 'drag', 'a', 'corner', 'Click', 'Double-click', 'Right-click']);
+const WORDS = new Set(['or', '/', '…', 'hold', 'Drag', 'drag', 'a', 'corner', 'Click', 'Double-click', 'Right-click', 'drag', 'scroll', 'an', 'edge']);
 function keyTokens(k) {
   return k
     .split(/\s+/)
@@ -75,7 +90,7 @@ export function toggleSheet(force) {
         h('div.dialog-head', h('h2', { id: 'keys-title' }, 'Shortcuts'), h('button.btn.btn-ghost.btn-xs', { type: 'button', 'aria-label': 'Close', onclick: () => sheet.close() }, '✕')),
         h(
           'div.keys-cols',
-          (plainOn() ? [...SHORTCUTS, PLAIN_SHORTCUTS] : SHORTCUTS).map(([title, rows]) =>
+          (plainOn() ? [...SHORTCUTS, PLAIN_SHORTCUTS] : tracksOn() ? [...SHORTCUTS, TRACK_SHORTCUTS] : SHORTCUTS).map(([title, rows]) =>
             h('div.keys-col', h('h3', title), h('dl.keys', rows.map(([k, d]) => [h('dt', keyTokens(k)), h('dd', d)]))),
           ),
         ),
@@ -108,7 +123,7 @@ function onKey(e) {
   }
   const mod = e.metaKey || e.ctrlKey;
   // a plain video's own edits (trim, layers...) get the key first; ⌘Z undoes whichever came last
-  if (plainKey(e)) {
+  if (tracksKey(e) || plainKey(e)) {
     e.preventDefault();
     return;
   }
