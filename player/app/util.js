@@ -43,6 +43,9 @@ export function svg(tag, attrs = {}, ...children) {
 
 /** Inline icon. 1.8 px rounded strokes, frames as 3:2 rounded rectangles. */
 const ICONS = {
+  crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  safe: '<rect x="3" y="4" width="18" height="16" rx="2"/><rect x="7" y="8" width="10" height="8" rx="1" stroke-dasharray="2 2"/>',
   play: '<path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/>',
   pause: '<rect x="6.5" y="5.5" width="3.6" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.9" y="5.5" width="3.6" height="13" rx="1" fill="currentColor" stroke="none"/>',
   prev: '<path d="M15 6l-6 6 6 6"/>',

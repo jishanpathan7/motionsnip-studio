@@ -21,6 +21,8 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
+import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
 const ROOT = path.dirname(HERE); // the repo / skill folder
@@ -376,9 +378,10 @@ export function lookFilter(look) {
 
 /**
  * ffmpeg arguments for exporting an edited plain video.
- *   opts: { video, hasVideoAudio, W, H, fps, D, keep, look, layers, music, musicVol, sfxVol, musicOffset, musicFade, encoder, out }
+ *   opts: { video, hasVideoAudio, W, H, fps, D, keep, look, layers, reframe, music, musicVol, sfxVol, musicOffset, musicFade, encoder, out }
  *   layers (source time, drawn in order): { kind: 'blur', t: [a, b], box: [X, Y, w, h] px, sigma }
  *                                       | { kind: 'png', t: [a, b], file, fade }
+ *   reframe (a cutdown; from reframeSpec): crop to another shape, or fit the frame on a blurred fill
  * The music runs on the edited (output) clock, so its offset and fade are where the reviewer heard them.
  */
 export function buildEditArgs(opts) {
@@ -414,6 +417,13 @@ export function buildEditArgs(opts) {
       parts.push(`[${input}:v]scale=${W}:${H},format=rgba${fades}${pic}`);
       step(`${pic}overlay=0:0:${on}`);
     }
+  }
+
+  // Another shape (a cutdown): after the layers, which are placed on the master's frame
+  if (opts.reframe) {
+    const r = reframeGraph(opts.reframe, cur, label);
+    parts.push(...r.parts);
+    cur = r.cur;
   }
 
   // Trim and cuts: keep each range, then join them.
@@ -824,6 +834,8 @@ export async function startServer(opts) {
     editEnc: null, // { path, encoder } for edit exports
     job: { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null },
     child: null,
+    cut: { state: 'idle', pct: 0, line: '', id: null, label: null }, // the cutdown being made
+    cutChild: null,
     takesBusy: new Set(),
   };
   const server = http.createServer((req, res) => {
@@ -849,6 +861,7 @@ export async function startServer(opts) {
     close: () =>
       new Promise((resolve) => {
         if (ctx.child) ctx.child.kill();
+        if (ctx.cutChild) ctx.cutChild.kill();
         server.close(() => resolve());
         server.closeAllConnections?.();
       }),
@@ -964,6 +977,12 @@ async function api(ctx, req, res, route, url) {
       return apiReveal(ctx, req, res);
     case 'GET takes':
       return apiTakes(ctx, res);
+    case 'GET cutdown':
+      return sendJson(res, 200, ctx.cut);
+    case 'POST cutdown':
+      return apiCutdown(ctx, req, res);
+    case 'POST cutdown-remove':
+      return apiCutdownRemove(ctx, req, res);
     case 'GET ffmpeg': {
       const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
       // edits: this ffmpeg can export a plain video's trim, cuts, colour and layers
@@ -976,6 +995,13 @@ async function api(ctx, req, res, route, url) {
 
 /** Load reel.json (or, with none, the plain video's made-up reel), or throw an http error with a short message. */
 async function loadReel(ctx) {
+  const reel = await readReel(ctx);
+  const mine = readPlayerOutputs(ctx.dir);
+  if (mine.length || reel.outputs) reel.outputs = mergeOutputs(reel.outputs, mine);
+  return reel;
+}
+
+async function readReel(ctx) {
   const file = path.join(ctx.dir, 'reel.json');
   if (!fs.existsSync(file)) return plainReel(ctx);
   let text;
@@ -1344,6 +1370,133 @@ async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
   }
 }
 
+// --- Cutdowns -----------------------------------------------------------------
+
+/** Music and levels from a request body (the player's current audio). */
+function levelsFrom(ctx, body) {
+  let music = null;
+  if (body.music) {
+    music = typeof body.music === 'string' ? resolveInside(ctx.dir, body.music) : null;
+    if (!music || !isFile(music)) throw httpError(400, 'Music file not found in the project');
+  }
+  return {
+    music,
+    musicVol: clamp(num(body.musicVol, 1), 0, 1),
+    sfxVol: clamp(num(body.sfxVol, 1), 0, 1),
+    musicOffset: num(body.musicOffset, 0),
+    musicFade: Math.max(0, num(body.musicFade, 0)),
+  };
+}
+
+/** Make (or make again) a cutdown: POST { id: preset or output id, keys?, mode?, zoom?, ranges?, music, levels }. */
+async function apiCutdown(ctx, req, res) {
+  if (ctx.cut.state === 'running') throw httpError(409, 'A cutdown is already being made');
+  const body = (await readJson(req)) || {};
+  if (typeof body.id !== 'string' || !body.id) throw httpError(400, 'Which cutdown? (id)');
+  const reel = await readReel(ctx);
+  const mine = readPlayerOutputs(ctx.dir);
+  if ((Array.isArray(reel.outputs) ? reel.outputs : []).some((o) => o && String(o.id) === body.id)) {
+    throw httpError(400, 'Claude made this version; ask Claude to change it');
+  }
+  const levels = levelsFrom(ctx, body);
+  const fail = (line) => {
+    ctx.cut = { state: 'error', pct: 0, line, id: body.id, label: null };
+    return sendJson(res, 200, ctx.cut);
+  };
+  const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+  if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
+  const encoder = await cutEncoder(ctx, ff);
+  if (!encoder) return fail("This ffmpeg can't make cutdowns (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
+  const video = resolveInside(ctx.dir, String(reel.src || ''));
+  if (!video || !isFile(video)) return fail(`Video not found: ${reel.src}`);
+  const info = await probe(ff, video);
+  if (!(info.duration > 0) || !info.w || !info.h) return fail("Couldn't read the video's length or size");
+
+  const prev = mine.find((o) => o.id === body.id) || null;
+  let entry;
+  try {
+    entry = planCutdown({ ...reel, w: info.w, h: info.h, duration: info.duration }, body, prev);
+  } catch (err) {
+    return fail(err.message);
+  }
+  ctx.cut = { state: 'running', pct: 0, line: `Making the ${entry.label} version…`, id: entry.id, label: entry.label };
+  runCutdown(ctx, ff, encoder, video, info, reel, entry, levels)
+    .then(() => setCut(ctx, { state: 'done', pct: 100, line: `Saved ${entry.src}` }))
+    .catch((err) => setCut(ctx, { state: 'error', line: err.message }));
+  return sendJson(res, 200, ctx.cut);
+}
+
+function setCut(ctx, patch) {
+  Object.assign(ctx.cut, patch);
+}
+
+/** The encoder for cutdowns: an edit encoder, if this ffmpeg also has setsar. */
+async function cutEncoder(ctx, ff) {
+  const encoder = await editEncoder(ctx, ff);
+  if (!encoder) return null;
+  if (ctx.cutOk?.path !== ff.path) {
+    const r = await run(ff.path, ['-hide_banner', '-filters'], { env: ffmpegEnv(ff) });
+    const have = new Set([...String(r.stdout).matchAll(/^ [A-Z.|]{2,4} (\S+) /gm)].map((m) => m[1]));
+    ctx.cutOk = { path: ff.path, ok: CUTDOWN_FILTERS.every((f) => have.has(f)) };
+  }
+  return ctx.cutOk.ok ? encoder : null;
+}
+
+async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
+  const D = info.duration;
+  const keep = entry.kind === 'bumper' ? entry.ranges : [[0, D]];
+  const reframe = entry.kind === 'reframe' ? reframeSpec(info.w, info.h, entry) : null;
+  const dir = path.join(ctx.dir, 'outputs');
+  fs.mkdirSync(dir, { recursive: true });
+  const final = path.join(dir, `${entry.id}.mp4`);
+  const tmp = path.join(dir, `.${entry.id}.${crypto.randomBytes(3).toString('hex')}.mp4`);
+  const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
+  const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W: info.w, H: info.h, fps: info.fps || reel.fps, D, keep, reframe, encoder, out: tmp, ...levels });
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['ignore', 'pipe', 'pipe'] });
+      ctx.cutChild = child;
+      let errText = '';
+      child.stdout.on('data', (d) => {
+        const m = [...String(d).matchAll(/out_time_us=(\d+)/g)].pop();
+        if (m) setCut(ctx, { pct: clamp((Number(m[1]) / 1e6 / OD) * 100, 0, 99) });
+      });
+      child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
+      child.on('error', reject);
+      child.on('close', (code) => {
+        ctx.cutChild = null;
+        if (code === 0) resolve();
+        else reject(new Error(lastLine(errText) || `ffmpeg exited with code ${code}`));
+      });
+    });
+    fs.renameSync(tmp, final);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  // list it (re-read: the list may have changed while ffmpeg ran)
+  const list = readPlayerOutputs(ctx.dir);
+  const i = list.findIndex((o) => o.id === entry.id);
+  const version = i >= 0 ? (Number(list[i].version) || 1) + 1 : 1;
+  const done = { ...entry, version, from: Number(reel.version) || 1, made: new Date().toISOString() };
+  if (i >= 0) list[i] = done;
+  else list.push(done);
+  writePlayerOutputs(ctx.dir, list);
+}
+
+/** Remove a cutdown made in the player, and its video. */
+async function apiCutdownRemove(ctx, req, res) {
+  const body = (await readJson(req)) || {};
+  if (ctx.cut.state === 'running' && ctx.cut.id === body.id) throw httpError(409, 'That cutdown is being made');
+  const list = readPlayerOutputs(ctx.dir);
+  const o = list.find((x) => x.id === body.id);
+  if (!o) throw httpError(404, 'No such cutdown');
+  const file = resolveInside(ctx.dir, `outputs/${o.id}.mp4`);
+  if (file) fs.rmSync(file, { force: true });
+  writePlayerOutputs(ctx.dir, list.filter((x) => x !== o));
+  return sendJson(res, 200, { ok: true });
+}
+
 /**
  * Run reel.json export.cmd. Env: PROPS (JSON file), OUT, RAW (temp path), PROJECT.
  * If the command writes $OUT we're done. If it only writes $RAW, we mix the music into it to make $OUT
@@ -1567,6 +1720,52 @@ async function selftest() {
     assert.equal(pickEditEncoder(filtersOut, ' V....D libx264              H.264\n V....D mpeg4    MPEG-4'), 'libx264');
     assert.equal(pickEditEncoder(filtersOut, ' V....D mpeg4                MPEG-4'), 'mpeg4');
     assert.equal(pickEditEncoder(' ... overlay  VV->V x', ' V....D libx264  H.264'), null, 'a trimmed ffmpeg cannot edit');
+
+    // Cutdowns: the crop path, the whole-frame fill, output merging and the shared reel module
+    assert.equal(keyExpr([]), '0');
+    assert.equal(keyExpr([{ t: 0, v: 10 }]), '10');
+    const kx = keyExpr([{ t: 1, v: 0 }, { t: 3, v: 100 }, { t: 5, v: 100 }]);
+    const evalAt = (expr, t) => Function('t', 'lt', 'if_', 'return ' + expr.replace(/\bif\(/g, 'if_('))(t, (a, b) => (a < b ? 1 : 0), (c, a, b) => (c ? a : b));
+    assert.equal(evalAt(kx, 0), 0, 'held before the first key');
+    assert.equal(evalAt(kx, 2), 50, 'halfway between keys');
+    assert.equal(evalAt(kx, 4), 100);
+    assert.equal(evalAt(kx, 9), 100, 'held after the last key');
+    assert.deepEqual(cropSize(1280, 720, 1080, 1920), { cw: 404, ch: 720 });
+    assert.deepEqual(cropSize(1280, 720, 1080, 1080, 2), { cw: 360, ch: 360 });
+    let rs = reframeSpec(1280, 720, { w: 1080, h: 1920, mode: 'crop', keys: [{ t: 0, cx: 0, cy: 50 }, { t: 2, cx: 100, cy: 50 }] });
+    assert.equal(rs.cw, 404);
+    assert.equal(evalAt(rs.x, 0), 0, 'kept inside the left edge');
+    assert.equal(evalAt(rs.x, 2), 1280 - 404, 'kept inside the right edge');
+    assert.equal(rs.y, '0');
+    rs = reframeSpec(1280, 720, { w: 1080, h: 1920, mode: 'blurpad' });
+    assert.deepEqual([rs.fw, rs.fh], [1080, 608]);
+    const rea = buildEditArgs({ ...ed, look: null, keep: [[0, 10]], reframe: reframeSpec(1920, 1080, { w: 1080, h: 1080, keys: [] }) });
+    assert.match(rea[rea.indexOf('-filter_complex') + 1], /^\[0:v\]crop=w=1080:h=1080:x='420':y='0',scale=1080:1080,setsar=1\[v1\];\[v1\]scale=out_color_matrix/);
+    const rpa = buildEditArgs({ ...ed, look: null, keep: [[0, 10]], reframe: rs });
+    assert.match(rpa[rpa.indexOf('-filter_complex') + 1], /split\[v1\]\[v2\].*overlay=0:656,setsar=1\[v5\]/);
+    assert.deepEqual(
+      mergeOutputs([{ id: 'vertical', src: 'v.mp4' }], [{ id: 'vertical', src: 'outputs/vertical.mp4' }, { id: 'square' }]).map((o) => [o.id, o.by]),
+      [['vertical', 'reel'], ['square', 'player']],
+      "Claude's output wins an id clash",
+    );
+    const mreel = normalizeReel({ w: 1280, h: 720, duration: 12, scenes: [{ id: 'a', t: [0, 4], els: [{ id: 'x', box: [10, 20, 20, 20] }] }, { id: 'b', t: [4, 12], els: [{ id: 'y', box: [60, 40, 10, 10] }] }], outputs: [{ id: 'bump', ranges: [[0, 2], [10, 12]] }, { id: 'vert', w: 1080, h: 1920 }] });
+    assert.deepEqual(mreel.outputs.map((o) => [o.id, o.kind, o.label, o.duration]), [['bump', 'bumper', '4 s', 4], ['vert', 'reframe', '9:16', 12]]);
+    const bview = resolveOutput(mreel, 'bump');
+    assert.ok(bview.derived);
+    assert.deepEqual(bview.scenes.map((x) => [x.id, x.t]), [['a', [0, 2]], ['b', [2, 4]]]);
+    assert.equal(outTime(mreel.outputs[0], 11), 3);
+    assert.equal(masterTime(mreel.outputs[0], 3), 11);
+    assert.equal(outTime(mreel.outputs[0], 5), 2, 'a time the bumper skips goes to its next range');
+    assert.equal(resolveOutput(mreel, 'nope').derived, false);
+    const ar = autoReframe(mreel, 1080, 1920);
+    assert.equal(ar.mode, 'crop');
+    assert.deepEqual([ar.keys[0].cx, ar.keys[0].cy], [20, 30]);
+    assert.deepEqual(autoRanges(mreel, 6).length, 2);
+    const pc = planCutdown({ w: 1280, h: 720, duration: 12, scenes: [] }, { id: 'square' }, null);
+    assert.deepEqual([pc.kind, pc.w, pc.h, pc.src, pc.audio.music], ['reframe', 1080, 1080, 'outputs/square.mp4', null]);
+    assert.throws(() => planCutdown({ w: 1920, h: 1080, duration: 5, scenes: [] }, { id: 'landscape' }, null), /already 16:9/);
+    assert.throws(() => planCutdown({ w: 1920, h: 1080, duration: 5, scenes: [] }, { id: '../x' }, null), /Unknown cutdown/);
+
     assert.equal(progressFromText('Rendered 10/200, encoded 50/200'), 25);
     assert.equal(progressFromText('nothing here'), null);
     assert.equal(slug('acme/launch v2'), 'acme-launch-v2');
@@ -1831,6 +2030,44 @@ async function selftest() {
         r = await request(es.port, 'POST', '/api/export', { body: JSON.stringify({ mode: 'edit', edit: { cuts: [[0, 4]] } }), headers: post });
         for (job = r.json; job.state === 'running'; job = (await request(es.port, 'GET', '/api/export')).json) await new Promise((res) => setTimeout(res, 50));
         assert.match(job.line, /Nothing left to export/);
+
+        // Cutdowns: a 9:16 crop that moves, a whole-frame square and a bumper, listed in .motionsnip/outputs.json
+        const cut = async (body) => {
+          let c = (await request(es.port, 'POST', '/api/cutdown', { body: JSON.stringify(body), headers: post })).json;
+          for (let i = 0; i < 300 && c.state === 'running'; i++) {
+            await new Promise((res) => setTimeout(res, 100));
+            c = (await request(es.port, 'GET', '/api/cutdown')).json;
+          }
+          return c;
+        };
+        let c = await cut({ id: 'vertical', mode: 'crop', keys: [{ t: 0, cx: 0, cy: 50 }, { t: 3, cx: 100, cy: 50 }] });
+        assert.equal(c.state, 'done', 'vertical: ' + c.line);
+        let ci = await probe(realFf, path.join(vd, 'outputs', 'vertical.mp4'));
+        assert.deepEqual([ci.w, ci.h], [1080, 1920]);
+        assert.ok(Math.abs(ci.duration - 4) < 0.15 && ci.hasAudio);
+        c = await cut({ id: 'square', mode: 'blurpad' });
+        assert.equal(c.state, 'done', 'square: ' + c.line);
+        ci = await probe(realFf, path.join(vd, 'outputs', 'square.mp4'));
+        assert.deepEqual([ci.w, ci.h], [1080, 1080]);
+        c = await cut({ id: 'bumper6', ranges: [[0, 1], [3, 4]] });
+        assert.equal(c.state, 'done', 'bumper: ' + c.line);
+        ci = await probe(realFf, path.join(vd, 'outputs', 'bumper6.mp4'));
+        assert.ok(Math.abs(ci.duration - 2) < 0.15, `bumper length ${ci.duration}`);
+        assert.equal(ci.w, 320);
+        c = await cut({ id: 'vertical', zoom: 1.5 });
+        assert.equal(c.state, 'done');
+        r = await request(es.port, 'GET', '/api/reel');
+        assert.deepEqual(r.json.outputs.map((o) => [o.id, o.by, o.version]), [['vertical', 'player', 2], ['square', 'player', 1], ['bumper6', 'player', 1]]);
+        assert.equal(r.json.outputs[0].zoom, 1.5);
+        assert.equal(r.json.outputs[0].keys.length, 2, 'a re-render keeps the keys');
+        assert.equal((await cut({ id: 'nope' })).state, 'error');
+        r = await request(es.port, 'POST', '/api/cutdown-remove', { body: JSON.stringify({ id: 'square' }), headers: post });
+        assert.equal(r.status, 200);
+        assert.ok(!fs.existsSync(path.join(vd, 'outputs', 'square.mp4')));
+        r = await request(es.port, 'GET', '/api/reel');
+        assert.deepEqual(r.json.outputs.map((o) => o.id), ['vertical', 'bumper6']);
+        r = await request(es.port, 'POST', '/api/cutdown', { body: JSON.stringify({ id: 'vertical' }) });
+        assert.equal(r.status, 403, 'a cutdown needs the player origin');
       } finally {
         await es.close();
       }

@@ -152,5 +152,23 @@
     {"id": "v1-1", "t": 1.5, "elId": "cue-dot", "kind": "safe area", "title": "Cue dot sits outside the title-safe area", "detail": "The dot spans 88–92% across and starts 8% from the top. Title-safe is a 10% inset, so it pokes past the right and top edges and can be cropped on some screens.", "fix": "Move it in to about [84, 11, 4, 7] so it sits inside the 10% inset."},
     {"id": "v1-2", "t": 8.0, "box": [10, 30, 80, 40], "kind": "cut", "title": "Scene 2 cards flash on the light background", "detail": "On the cut at 8.0 s (frame 240) the background turns light one frame before the Watch and Fix cards leave, so they flash on the wrong colour.", "fix": "End the cards on frame 239, or switch the background on frame 241 with them."},
     {"id": "v1-3", "t": 8.2, "x": 50, "y": 50, "kind": "timing", "title": "Half a second of empty frame before the logo", "detail": "From 8.03 s to 8.5 s the frame is plain paper. The logo only lands on frame 255, so the end card starts on nothing.", "fix": "Bring the logo block in at 8.0 s, or fade it up from the cut."}
+  ],
+  "outputs": [
+    {
+      "id": "vertical", "label": "9:16", "kind": "reframe", "platform": "reels", "src": "outputs/vertical.mp4", "w": 1080, "h": 1920, "duration": 12.0,
+      "mode": "crop", "keys": [{"t": 0, "cx": 56, "cy": 35}, {"t": 3.967, "cx": 56, "cy": 35}, {"t": 4, "cx": 50, "cy": 50}],
+      "audio": {"music": null, "videoAudio": "mix"},
+      "review": [
+        {"id": "vert-1", "t": 9.5, "x": 97, "y": 44.5, "kind": "reframe", "title": "The logo dot is cut off by the 9:16 crop", "detail": "The crop holds the centre of the frame through the outro, so the dot at 65–68% across in the master lands on the right edge of the vertical version, half outside it.", "fix": "Move the crop to about 55% across from 8.5 s, or bring the dot in next to the wordmark in the master."}
+      ]
+    },
+    {
+      "id": "square", "label": "1:1", "kind": "reframe", "platform": "feed", "src": "outputs/square.mp4", "w": 1080, "h": 1080, "duration": 12.0,
+      "mode": "blurpad", "audio": {"music": null, "videoAudio": "mix"}
+    },
+    {
+      "id": "bumper", "label": "6 s", "kind": "bumper", "src": "outputs/bumper.mp4", "w": 1280, "h": 720, "duration": 6.0,
+      "ranges": [[0, 3.3], [9.3, 12]], "audio": {"music": null, "videoAudio": "mix"}
+    }
   ]
 }

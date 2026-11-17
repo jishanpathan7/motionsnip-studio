@@ -91,6 +91,15 @@ Pointing it at a folder without a `reel.json` opens the newest video in it. In t
 
 **Export with your edits** re-encodes the video with all of it, plus any music you picked on the **Sound** tab. The original file stays as it is. Notes you pin on the frame still go to Claude with **Send to Claude**. Exporting edits needs an ffmpeg build with the `overlay`, `gblur`, `colorchannelmixer` and `lutrgb` filters; the standard builds have them.
 
+## Cutdowns
+
+One master, every shape. **+ Cutdown** above the frame makes a **9:16**, **1:1** (or **16:9** from a vertical master) or a **6-second bumper** with ffmpeg, into `outputs/`. Each gets its own tab with its own notes, and the music is mixed in.
+
+- **Reframe** a 9:16 or 1:1: the master shows a window the shape of the cutdown. Drag it to set the crop at the playhead; between keys it glides, at a cut add a key each side. **Auto** guesses from the elements in each scene; **Whole frame** fits it on a blurred fill instead. **Render** makes it again.
+- **Safe areas**: title/action safe, and the parts of the screen Reels, TikTok and Shorts cover with their own buttons and captions (approximate).
+- Notes on a cutdown go to Claude under their own heading, on that version's frame and clock. If the master changes, the cutdown's tab shows a dot until you re-render it.
+- Claude can lay a code-built video out again for 9:16 and list it in `reel.json` `outputs`; it shows up as a tab the same way.
+
 ## Player controls
 
 | Key or action | What it does |
@@ -233,6 +242,7 @@ Install it (`brew install ffmpeg` on macOS), or start the server with `--ffmpeg 
 ```
 SKILL.md              the Claude Code skill
 player/server.mjs     the local server (Node 18+, no dependencies)
+player/lib/           server helpers (cutdowns)
 player/index.html     the player page
 player/app/           the player's scripts and styles
 docs/SPEC.md          the full product spec

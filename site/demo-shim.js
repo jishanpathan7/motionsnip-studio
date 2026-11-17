@@ -78,6 +78,12 @@
         return json(200, { ok: false, path: null, edits: false });
       case 'POST export':
         return json(400, { error: 'Export runs on your own computer. Install MotionSnip Studio to export an mp4.' });
+      case 'GET cutdown':
+        return json(200, { state: 'idle', pct: 0, line: '', id: null, label: null });
+      case 'POST cutdown':
+        return json(400, { error: 'Cutdowns are made on your own computer. Install MotionSnip Studio to make a 9:16, 1:1 or bumper.' });
+      case 'POST cutdown-remove':
+        return json(400, { error: 'Not available in the web demo' });
       case 'POST reveal':
         return json(400, { error: 'Not available in the web demo' });
       default:

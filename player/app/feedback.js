@@ -5,7 +5,7 @@ import {
   bus,
   getEl,
   sceneOfEl,
-  notes,
+  allNotes,
   sceneStatus,
   persist,
   flushPersist,
@@ -16,6 +16,7 @@ import {
 } from './state.js';
 import { api, copyText, fmtTime, round, sameValue, sameBox, toast } from './util.js';
 import { hasEdits as plainEdits, summary as plainSummary } from './vedit.js';
+import { resolveOutput } from './reel.mjs';
 
 const q = (v) => {
   if (v == null) return 'none';
@@ -127,7 +128,8 @@ export function describe(c) {
     };
   }
   if (c.kind === 'note') {
-    const sc = store.reel.scenes.find((s) => s.id === c.sceneId) || sceneAt(c.t);
+    const scenes = c.out ? resolveOutput(store.master, c.out).scenes : store.master.scenes;
+    const sc = scenes.find((s) => s.id === c.sceneId && c.t >= s.t[0] - 0.01 && c.t <= s.t[1] + 0.01) || scenes.find((s) => s.id === c.sceneId) || (c.out ? null : sceneAt(c.t));
     const el = c.elId && getEl(c.elId);
     const on = el ? ` · on ${el.label}${el.src ? ` (${el.src})` : ''}` : '';
     return {
@@ -152,7 +154,7 @@ function short(v) {
 // ---------------------------------------------------------------- markdown
 
 export function buildMarkdown(list = store.data.changes) {
-  const reel = store.reel;
+  const reel = store.master;
   const out = [];
   out.push(`MotionSnip Studio feedback for "${reel.title}" v${reel.version}`);
   if (reel.plain) out.push(`Video: ${reel.file || reel.src} (a plain video file, no reel.json) · ${reel.w}x${reel.h} · ${round(reel.duration, 2)}s`);
@@ -176,11 +178,24 @@ export function buildMarkdown(list = store.data.changes) {
         : 'Video sound: effects only; the music plays from its own file beside the video.',
     );
   }
-  const ns = list.filter((c) => c.kind === 'note');
+  const ns = list.filter((c) => c.kind === 'note' && !c.out);
   if (ns.length) {
     out.push('', '## Comments on the frame');
-    const all = notes();
+    const all = allNotes().filter((n) => !n.out);
     for (const n of ns) out.push(`${all.indexOf(n) + 1 || ns.indexOf(n) + 1}. ${describe(n).line}`);
+  }
+  for (const o of reel.outputs) {
+    const on = list.filter((c) => c.kind === 'note' && c.out === o.id);
+    if (!on.length) continue;
+    out.push('', `## Comments on the ${o.label} version (${o.id}: ${o.src}, ${o.w}x${o.h}, ${round(o.duration, 2)}s)`);
+    if (o.kind === 'bumper') out.push(`Times are on the ${o.label} version's own clock; it is cut from the master at ${o.ranges.map(([a, b]) => `${fmtTime(a)}-${fmtTime(b)}`).join(', ')}.`);
+    on.forEach((n, i) => out.push(`${i + 1}. ${describe(n).line}`));
+  }
+  const made = reel.outputs.filter((o) => o.by === 'player');
+  if (made.length) {
+    out.push('', '## Cutdowns made in MotionSnip Studio');
+    out.push('MotionSnip Studio renders these itself from the master, so leave the files alone. Fix framing problems noted above in the master (keep the important things where these crops can see them); the reviewer re-renders the cutdowns after your next version.');
+    for (const o of made) out.push(`- ${o.id} (${o.label}, ${o.w}x${o.h}): ${describeOutput(o)}`);
   }
   const gone = dismissedFindings();
   if (gone.length) {
@@ -210,6 +225,16 @@ export function buildMarkdown(list = store.data.changes) {
   return out.join('\n') + '\n';
 }
 
+/** How a player-made output was cut from the master, in one line. */
+export function describeOutput(o) {
+  if (o.kind === 'bumper') return `${o.ranges.map(([a, b]) => `${fmtTime(a)}-${fmtTime(b)}`).join(' + ')} of the master`;
+  if (o.kind === 'reframe') {
+    const keys = o.keys.length ? o.keys.map((k) => `${fmtTime(k.t)} at ${round(k.cx, 1)}%,${round(k.cy, 1)}%`).join(', ') : 'centred';
+    return o.mode === 'blurpad' ? 'the whole frame on a blurred fill' : `cropped${o.zoom > 1 ? ` at ${round(o.zoom, 2)}x zoom` : ''}, crop centre ${keys}`;
+  }
+  return o.src;
+}
+
 export function promptLine(path) {
   return `Apply the MotionSnip Studio feedback in ${path}`;
 }
@@ -220,7 +245,7 @@ export function sendableCount() {
 
 /** Send to Claude: write the feedback file, copy the prompt, mark changes as sent. */
 export async function send() {
-  const reel = store.reel;
+  const reel = store.master;
   const list = unsentChanges();
   if (!list.length && !store.data.notQuite.length) {
     toast('Nothing to send yet. Change something or circle a problem first.');
@@ -252,7 +277,7 @@ export async function send() {
 // ---------------------------------------------------------------- Check vN
 
 function matches(c) {
-  const reel = store.reel;
+  const reel = store.master;
   if (c.kind === 'prop') {
     const p = getEl(c.elId)?.props[c.propKey];
     return !!p && sameValue(p.v, c.after);
@@ -288,7 +313,7 @@ export function startCheck(sent, fromVersion) {
     });
   }
   store.data.pending = null;
-  store.data.check = items.length ? { from: fromVersion, to: store.reel.version, items } : null;
+  store.data.check = items.length ? { from: fromVersion, to: store.master.version, items } : null;
   persist();
   bus.emit('check', { check: store.data.check });
   return store.data.check;

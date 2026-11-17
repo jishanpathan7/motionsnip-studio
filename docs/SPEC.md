@@ -70,6 +70,9 @@ Licence: MIT, `Copyright (c) 2026 Jishan Pathan`. Written from scratch from this
   "review": [                       // optional: Claude's self-review of this render
     { "id": "v1-1", "t": 1.5, "elId": "headline", "kind": "safe area", "title": "…", "detail": "…", "fix": "…" }
   ],
+  "outputs": [                      // optional: versions made from this master (see below)
+    { "id": "vertical", "label": "9:16", "kind": "reframe", "src": "out/vertical.mp4", "w": 1080, "h": 1920, "version": 1, "review": [] }
+  ],
   "live": "live.js",                // optional live renderer (section 6)
   "export": { "cwd": "/abs/build/folder", "props": {}, "cmd": "npx remotion render ... \"$OUT\" --props=\"$PROPS\"" }  // optional
 }
@@ -85,6 +88,16 @@ visible from 0.75 s before `t` to 2.5 s after. Clicking one opens a card with th
 actions: **Add as my note** (it becomes a normal pink note carrying the finding id) and **Dismiss**. Changes lists open
 and dismissed findings under "Claude spotted", with Show me, accept, dismiss and bring back. The decision is saved per
 version (`review: { "v<N>:<id>": "accepted" | "dismissed" }` in the saved state), so a new version starts fresh.
+
+`outputs` are other videos made from the master: a reframe (another shape), a bumper (a few seconds cut from it,
+`ranges: [[a, b], …]` in master time), a separate render, or a language version (`kind`: `reframe` | `bumper` | `render` |
+`lang`). Each has its own `id`, `label`, `src`, `w`, `h`, `duration` (defaults: the master's), `version` (default 1),
+`audio` (laid over the master's; `{ "music": null, "videoAudio": "mix" }` when the music is in the file) and `review`
+(findings on its own frame and clock). Scenes and elements are the master's; a bumper's scenes follow its ranges.
+The player's own cutdowns live in `.motionsnip/outputs.json` (`{ outputs: [...] }`, same fields plus `mode: crop |
+blurpad`, `zoom`, `keys: [{ t, cx, cy }]` crop centres in % of the master, and `from`: the master version it was made
+from); the server merges them after reel.json's, which win an id clash. Shared code for all of this is
+`player/app/reel.mjs` (no DOM; the server imports it too).
 
 Scenes cover 0..duration without gaps. Ids stay stable between versions; saved edits match by id.
 Unknown fields are ignored; missing optional fields get defaults.
@@ -125,9 +138,20 @@ node player/server.mjs --selftest
 - `GET /api/takes` → `[{ version, src }]`; when a new `version` is first served, copy its video to `.motionsnip/takes/v<N>.<ext>`
   (on macOS use `cp -c` clone when possible), keep the newest 6.
 - `GET /api/ffmpeg` → `{ ok, path }` so the player can warn before export.
+- `POST /api/cutdown` `{ id, keys?, mode?, zoom?, ranges?, music, musicVol, sfxVol, musicOffset, musicFade }` → makes a
+  cutdown (one at a time; `GET /api/cutdown` → `{ state, pct, line, id, label }`). `id` is a preset (`vertical` 1080×1920,
+  `square` 1080×1080, `landscape` 1920×1080, `bumper6`) or an existing player cutdown to render again (its keys, mode,
+  zoom and ranges are kept unless the request changes them). Without keys a reframe starts from a guess: per scene, centre
+  the elements' boxes, jump at the cuts; whole frame on a blurred fill when most scenes don't fit. A bumper without ranges
+  takes the opening of the first scene and the end of the last. The ffmpeg graph is the edit export's (`buildEditArgs`)
+  with a reframe step: `crop` whose x/y are expressions of `t` (straight lines between keys), `scale`, `setsar=1`; or a
+  blurred, dimmed fill under the frame scaled to fit. The music is mixed in. Renders to a temp file, then
+  `outputs/<id>.mp4`, then bumps that entry's `version` in `.motionsnip/outputs.json`. 400 for an output reel.json lists.
+- `POST /api/cutdown-remove` `{ id }` → deletes a player cutdown and its file.
 - `--selftest`: covers byte-range parsing, upload name cleaning (traversal, dotfiles, unicode, wrong extension, long names),
   magic-byte sniffing, host and origin checks, the ffmpeg mix argument builder (offset +/-, fade, no video audio), and an
-  end-to-end upload against a temp project. Prints `selftest ok` and exits 0, or the failure and exits 1.
+  end-to-end upload against a temp project; outputs (key expressions, crop sizes, the reframe graph, merging, bumper
+  clocks, first guesses) and, with a full ffmpeg, real 9:16, 1:1 and bumper renders checked for size and length. Prints `selftest ok` and exits 0, or the failure and exits 1.
 
 ## 4. Player (browser; plain ES modules + CSS, no framework, no build)
 
@@ -207,6 +231,14 @@ Project: <path> · <w>x<h> · <fps> fps · <duration>s
 ## Comments on the frame
 1. [<mm:ss.s> · <scene id> <scene name> · x 23.9% y 81.8% · on <element label> (<src>)] <comment>
 2. [<mm:ss.s> · …] <comment> (from your self-review, <finding id>; the reviewer agrees)
+
+## Comments on the <label> version (<id>: <src>, <w>x<h>, <duration>s)
+<for a bumper: one line saying times are on its own clock and which master ranges it is cut from>
+1. [<mm:ss.s> · <scene id> <scene name> · x 50.0% y 80.0%] <comment>
+
+## Cutdowns made in MotionSnip Studio
+<one line: the player renders these from the master; fix framing in the master>
+- <id> (<label>, <w>x<h>): cropped, crop centre <mm:ss.s> at <cx>%,<cy>% … | the whole frame on a blurred fill | <ranges> of the master
 
 ## Dismissed from your self-review
 The reviewer looked at these and is happy as it is. Leave them, and don't flag them again.
