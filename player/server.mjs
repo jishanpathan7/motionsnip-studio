@@ -911,6 +911,38 @@ function timelineReel(ctx) {
  *   base: the rev the edit was made on; a different file on disk is a 409 (reload, then edit again).
  *   bump: start a new version (Apply); plain editor saves keep the version.
  */
+/** The video a timeline.json was made from ("Open in timeline"), or null. */
+function timelineFrom(ctx) {
+  try {
+    const from = JSON.parse(fs.readFileSync(path.join(ctx.dir, 'timeline.json'), 'utf8'))?.from;
+    return typeof from === 'string' ? from : null;
+  } catch {
+    return null;
+  }
+}
+
+/** "Open in timeline": the plain video and its edits, converted by the player, become the folder's timeline.json. */
+async function apiTimelineOpen(ctx, req, res) {
+  const body = (await readJson(req)) || {};
+  const reel = await readReel(ctx);
+  if (!reel.plain) throw httpError(400, 'Only a plain video opens in the timeline');
+  const tl = body.content;
+  if (!tl || typeof tl !== 'object' || Array.isArray(tl)) throw httpError(400, 'timeline must be a JSON object');
+  if (tl.from !== reel.src) throw httpError(400, `The timeline must be made from ${reel.src}`);
+  try {
+    normTimeline(tl, { scenes: {} });
+  } catch (err) {
+    throw httpError(400, err.message);
+  }
+  try {
+    fs.writeFileSync(path.join(ctx.dir, 'timeline.json'), JSON.stringify(tl, null, 2) + '\n', { flag: 'wx' });
+  } catch (err) {
+    if (err.code === 'EEXIST') throw httpError(409, 'This folder already has a timeline.json');
+    throw err;
+  }
+  return sendJson(res, 200, { ok: true, file: 'timeline.json' });
+}
+
 async function apiProjectApply(ctx, req, res) {
   const body = (await readJson(req)) || {};
   const rel = typeof body.file === 'string' ? body.file : '';
@@ -1126,6 +1158,8 @@ async function api(ctx, req, res, route, url) {
       return apiFormats(ctx, res);
     case 'POST project-apply':
       return apiProjectApply(ctx, req, res);
+    case 'POST timeline-open':
+      return apiTimelineOpen(ctx, req, res);
     case 'POST frames-start':
       return apiFramesStart(ctx, req, res);
     case 'POST frames-push':
@@ -1153,8 +1187,9 @@ async function loadReel(ctx) {
 async function readReel(ctx) {
   const file = path.join(ctx.dir, 'reel.json');
   if (!fs.existsSync(file)) {
+    // a video opened as a file plays plain until "Open in timeline" makes a timeline.json for it
+    if (isFile(path.join(ctx.dir, 'timeline.json')) && (!ctx.video || timelineFrom(ctx) === ctx.video)) return timelineReel(ctx);
     if (ctx.video) return plainReel(ctx);
-    if (isFile(path.join(ctx.dir, 'timeline.json'))) return timelineReel(ctx);
     return isFile(path.join(ctx.dir, 'scene.json')) ? sceneReel(ctx) : plainReel(ctx);
   }
   let text;
@@ -2348,6 +2383,68 @@ async function selftest() {
       assert.equal(r.json.plain, undefined);
     } finally {
       await ps.close();
+    }
+    // "Open in timeline": a plain video and its edits become timeline.json
+    {
+      const { timelineFromPlain, keptRanges } = await import('./app/comp/fromplain.mjs');
+      assert.deepEqual(keptRanges(10, [1, 9], [[3, 4]]), [[1, 3], [4, 9]]);
+      const edit = {
+        trim: [1, 9],
+        cuts: [[3, 4]],
+        look: { brightness: 0, contrast: 0.2, saturation: 0, warmth: 0 },
+        layers: [
+          { id: 'w', kind: 'text', t: [2, 6], box: [10, 40, 80, 0], text: 'Hi', font: 'mono', size: 6, color: '#ff0000', bold: true, align: 'left', bg: true, bgColor: '#000000', bgOpacity: 0.5, shadow: false, fade: true },
+          { id: 'b', kind: 'blur', t: [0, 2], box: [5, 5, 20, 10], amount: 2 },
+          { id: 'l', kind: 'image', t: [0, 10], box: [80, 5, 10, 0], src: 'assets/Logo.png', opacity: 0.5, fade: false },
+        ],
+      };
+      const tl = timelineFromPlain({ src: 'A.mp4', title: 'A.mp4', w: 1280, h: 720, fps: 30, duration: 10 }, edit, { w: 9 });
+      assert.equal(tl.from, 'A.mp4');
+      assert.deepEqual(tl.size, [1280, 720]);
+      assert.deepEqual(tl.tracks[0].clips.map((c) => [c.at, c.in, c.out]), [[0, 1, 3], [2, 4, 9]], 'cuts become clips back to back');
+      assert.deepEqual(tl.tracks[0].clips[0].look, { contrast: 0.2 });
+      const g = tl.tracks[1].clips;
+      assert.deepEqual(g.find((c) => c.id === 'b'), { id: 'b', at: 0, dur: 1, type: 'blur', box: [5, 5, 20, 10], amount: 4 }, 'trimmed away before 1 s');
+      const words = g.filter((c) => c.type === 'text');
+      assert.deepEqual(words.map((c) => [c.id, c.at, c.dur]), [['w-1', 1, 1], ['w-2', 2, 2]], 'a layer across a cut is split');
+      assert.ok(words[0].enter && !words[0].exit && words[1].exit && !words[1].enter, 'fades at the outer ends only');
+      assert.deepEqual(words[0].box, [10, 40, 80, 9]);
+      assert.deepEqual(words[0].style, { font: 'DM Mono', size: 6, weight: 700, color: '#ff0000', bg: '#00000080', align: 'left', shadow: false });
+      const logos = g.filter((c) => c.type === 'image');
+      assert.deepEqual(logos.map((c) => c.dur), [2, 5], 'the logo covers every kept part');
+      assert.ok(logos[0].keys.opacity[0][1] === 0.5 && logos[0].box[3] > 17 && logos[0].box[3] < 18, 'its opacity, and a square box by default');
+      const norm = (await import('./app/comp/timeline.mjs')).normTimeline(JSON.parse(JSON.stringify(tl)), { scenes: {} });
+      assert.equal(norm.duration, 7);
+      assert.equal(norm.issues.length, 0, JSON.stringify(norm.issues));
+      assert.throws(() => timelineFromPlain({ src: 'A.mp4', duration: 10 }, { trim: [5, 5] }), /Nothing is left/);
+
+      const two = mkTmp();
+      fs.writeFileSync(path.join(two, 'A.mp4'), Buffer.alloc(3000, 3));
+      fs.writeFileSync(path.join(two, 'B.mp4'), Buffer.alloc(3000, 4));
+      const none = path.join(two, 'no-ffmpeg-here');
+      const sa = await startServer({ dir: two, video: 'A.mp4', port: 0, open: false, quiet: true, ffmpeg: none });
+      try {
+        const post = { origin: `http://localhost:${sa.port}` };
+        const open = (content) => request(sa.port, 'POST', '/api/timeline-open', { body: JSON.stringify({ content }), headers: post });
+        let r = await open({ ...tl, from: 'B.mp4' });
+        assert.equal(r.status, 400, 'made from another video');
+        r = await open(tl);
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        r = await request(sa.port, 'GET', '/api/reel');
+        assert.ok(!r.json.plain && r.json.timeline, 'the video now opens as its timeline');
+        const before = fs.readFileSync(path.join(two, 'timeline.json'), 'utf8');
+        r = await open({ ...tl, title: 'Again' });
+        assert.ok(r.status >= 400 && fs.readFileSync(path.join(two, 'timeline.json'), 'utf8') === before, 'never overwrites a timeline.json');
+      } finally {
+        await sa.close();
+      }
+      const sb = await startServer({ dir: two, video: 'B.mp4', port: 0, open: false, quiet: true, ffmpeg: none });
+      try {
+        const r = await request(sb.port, 'GET', '/api/reel');
+        assert.equal(r.json.plain, true, 'another video in the folder still plays plain');
+      } finally {
+        await sb.close();
+      }
     }
     // A scene project: scene.json, no reel.json. The reel is built from the scene; the player draws it live.
     {
