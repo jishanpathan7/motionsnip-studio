@@ -27,6 +27,12 @@
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   --wave-music: rgba(246, 244, 239, 0.55);
   --wave-fx: rgba(164, 157, 179, 0.75);
+  /* timeline clips, one colour per track kind; labels use --text on them */
+  --clip-video: #2c3b52;
+  --clip-scene: #3a2f52;
+  --clip-graphics: #4a3348;
+  --clip-audio: #24403a;
+  --clip-captions: #45422a;
 
   --sans: 'Bricolage Grotesque', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: 'DM Mono', ui-monospace, 'SF Mono', Menlo, monospace;
@@ -50,6 +56,11 @@
     --shadow: 0 12px 40px rgba(21, 18, 29, 0.16);
     --wave-music: rgba(21, 18, 29, 0.5);
     --wave-fx: rgba(106, 99, 120, 0.7);
+    --clip-video: #d7e3f4;
+    --clip-scene: #e3dbf3;
+    --clip-graphics: #f3dcec;
+    --clip-audio: #d5ece4;
+    --clip-captions: #efecd0;
     color-scheme: light;
   }
 }
@@ -69,6 +80,11 @@
   --shadow: 0 12px 40px rgba(21, 18, 29, 0.16);
   --wave-music: rgba(21, 18, 29, 0.5);
   --wave-fx: rgba(106, 99, 120, 0.7);
+  --clip-video: #d7e3f4;
+  --clip-scene: #e3dbf3;
+  --clip-graphics: #f3dcec;
+  --clip-audio: #d5ece4;
+  --clip-captions: #efecd0;
   color-scheme: light;
 }
 
@@ -3000,21 +3016,6 @@ kbd {
   cursor: grab;
   min-width: 4px;
 }
-.trk-clip.k-video {
-  background: color-mix(in srgb, #4f86d9 32%, var(--raised));
-}
-.trk-clip.k-scene {
-  background: color-mix(in srgb, #8a63d2 32%, var(--raised));
-}
-.trk-clip.k-graphics {
-  background: color-mix(in srgb, var(--cue) 28%, var(--raised));
-}
-.trk-clip.k-audio {
-  background: color-mix(in srgb, var(--ok) 26%, var(--raised));
-}
-.trk-clip.k-captions {
-  background: color-mix(in srgb, #d9c24f 30%, var(--raised));
-}
 .trk-clip.is-sel {
   cursor: grabbing;
 }
@@ -3197,34 +3198,19 @@ kbd {
   min-width: 4px;
 }
 .trk-clip.k-video {
-  background: #2c3b52;
+  background: var(--clip-video);
 }
 .trk-clip.k-scene {
-  background: #3a2f52;
+  background: var(--clip-scene);
 }
 .trk-clip.k-graphics {
-  background: #4a3348;
+  background: var(--clip-graphics);
 }
 .trk-clip.k-audio {
-  background: #24403a;
+  background: var(--clip-audio);
 }
 .trk-clip.k-captions {
-  background: #45422a;
-}
-:root[data-theme='light'] .trk-clip.k-video {
-  background: #d7e3f4;
-}
-:root[data-theme='light'] .trk-clip.k-scene {
-  background: #e3dbf3;
-}
-:root[data-theme='light'] .trk-clip.k-graphics {
-  background: #f3dcec;
-}
-:root[data-theme='light'] .trk-clip.k-audio {
-  background: #d5ece4;
-}
-:root[data-theme='light'] .trk-clip.k-captions {
-  background: #efecd0;
+  background: var(--clip-captions);
 }
 .trk-clip.is-sel {
   border-color: var(--tape);
@@ -3243,6 +3229,7 @@ kbd {
 .trk-clip-name {
   position: relative;
   padding: 0 8px;
+  color: var(--text);
   font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -3250,8 +3237,14 @@ kbd {
   text-overflow: ellipsis;
   pointer-events: none;
 }
+/* over thumbnails: a dark chip, readable on any frame and in either theme */
 .trk-clip.k-video .trk-clip-name {
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(12, 10, 18, 0.72);
   color: #fff;
 }
 .trk-trans {
