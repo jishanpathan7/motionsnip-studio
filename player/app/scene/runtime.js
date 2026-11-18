@@ -6,7 +6,7 @@ import { normScene, setPath } from './compile.mjs';
 import { frameSVG } from './draw.mjs';
 import { prepare } from './motion.mjs';
 
-const FONT_HREF = 'https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap';
+const FONT_HREF = '/app/fonts/fonts.css'; // Patrick Hand, served with the player
 
 function ensureFont() {
   if (document.querySelector(`link[data-scene-font]`)) return;

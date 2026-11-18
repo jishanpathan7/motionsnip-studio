@@ -9,7 +9,7 @@ import { setPath as sceneSetPath } from '../scene/compile.mjs';
 import { frameSVG } from '../scene/draw.mjs';
 import { drawGraphic, rectOf, cssFor, lookSvg, drawFit, applyLookPixels, withTransform } from './graphics.mjs';
 
-const SCENE_FONT = 'https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap';
+const SCENE_FONT = '/app/fonts/fonts.css'; // Patrick Hand, served with the player
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 function ensureFont() {

@@ -286,6 +286,7 @@ player/index.html     the player page
 player/app/           the player's scripts and styles
 player/app/scene/     the scene compiler and hand-drawn renderer (no dependencies)
 player/app/comp/      the timeline model, edit operations, compositor and frame export
+player/app/fonts/     Bricolage Grotesque, DM Mono and Patrick Hand (SIL Open Font License)
 player/app/tracks.js  the multi-track timeline editor
 docs/SPEC.md          the full product spec
 docs/brand/           logo, favicons and the brand guide
@@ -298,3 +299,5 @@ examples/addons/hello/ an example add-on: one server route and one header button
 ## Licence
 
 [MIT](LICENSE). Copyright (c) 2026 Jishan Pathan.
+
+The fonts in `player/app/fonts/` are under the SIL Open Font License 1.1; each family's licence is beside it.
