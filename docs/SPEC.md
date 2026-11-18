@@ -108,8 +108,15 @@ Unknown fields are ignored; missing optional fields get defaults.
 
 ```
 node player/server.mjs <project-dir> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
+                       [--addons <dir>]… [--no-addons] [--safe]
 node player/server.mjs --selftest
 ```
+
+- `--safe` (`startServer({ projectCode: false })`): code from the project folder never runs.
+  - `GET /api/reel` leaves out `export.cmd`/`export.cwd` and a script `live`, and lists what it left out in
+    `codeOff: ['export.cmd', 'live']`. The player says so once.
+  - `POST /api/export {mode: "render"}` returns 403.
+  - MotionSnip's own scene and timeline renderers still run: they draw data, not project code.
 
 - Binds 127.0.0.1. If the port is busy, tries the next one. Prints `MotionSnip Studio: http://localhost:<port>  (project: <dir>)`.
   Opens the browser unless `--no-open`.
