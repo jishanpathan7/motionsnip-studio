@@ -1029,6 +1029,11 @@ export async function startServer(opts) {
     });
   });
 
+  // Node closes an idle kept-alive connection after 5 s by default. A browser that sends on that socket just as
+  // it closes gets "Failed to fetch", which can drop an export partway through (a frame batch that takes a few
+  // seconds to draw is enough). Keep idle connections much longer than any pause between requests.
+  server.keepAliveTimeout = 60_000;
+  server.headersTimeout = 65_000;
   const port = await listen(server, opts.port ?? DEFAULT_PORT);
   ctx.port = port;
   const url = `http://localhost:${port}`;
@@ -2351,6 +2356,16 @@ async function selftest() {
       assert.equal(r.status, 404);
       r = await req('GET', '/app/brand/favicon.svg');
       assert.equal(r.status, isFile(path.join(BRAND_DIR, 'favicon.svg')) ? 200 : 404);
+      // fonts are served with the player: nothing for an export to fetch from outside
+      r = await req('GET', '/app/fonts/fonts.css');
+      assert.equal(r.status, 200);
+      const fontFiles = [...r.buf.toString().matchAll(/url\('([^']+\.woff2)'\)/g)].map((m) => m[1]);
+      assert.ok(fontFiles.length >= 6, 'fonts.css names its font files');
+      for (const f of new Set(fontFiles)) {
+        const fr = await req('GET', `/app/fonts/${f}`);
+        assert.equal(fr.status, 200, f);
+        assert.equal(fr.headers['content-type'], 'font/woff2');
+      }
       r = await req('GET', '/app/..%2fserver.mjs');
       assert.equal(r.status, 403);
       r = await req('GET', '/app/brand/..%2f..%2fSPEC.md');

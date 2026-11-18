@@ -3,6 +3,7 @@
 //
 //   node player/bench/render.mjs [--cases scene,timeline,plain] [--size 1080] [--fps 30] [--format mp4]
 //                                [--seconds 60] [--runs 1] [--chrome /path/to/chrome] [--no-gpu] [--json out.json]
+//                                [--keep dir]   (keep each export there, as <case>-<size>.mp4)
 //
 // Cases:
 //   scene     examples/scene-demo, drawn frame by frame in headless Chrome (SVG → pixels) and encoded by ffmpeg
@@ -25,7 +26,7 @@ const SERVER = path.join(ROOT, 'player/server.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs(argv) {
-  const o = { cases: ['scene', 'timeline', 'plain'], size: '1080', fps: 30, format: 'mp4', seconds: 60, runs: 1, chrome: null, gpu: true, json: null };
+  const o = { cases: ['scene', 'timeline', 'plain'], size: '1080', fps: 30, format: 'mp4', seconds: 60, runs: 1, chrome: null, gpu: true, json: null, keep: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = () => argv[++i];
@@ -38,6 +39,7 @@ function parseArgs(argv) {
     else if (a === '--chrome') o.chrome = v();
     else if (a === '--no-gpu') o.gpu = false;
     else if (a === '--json') o.json = v();
+    else if (a === '--keep') o.keep = v();
     else if (a === '--help' || a === '-h') {
       console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 16).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(0);
@@ -311,6 +313,7 @@ async function frameCase(name, example, o, chromeBin) {
   const t = await stopServer(s);
   const file = newestExport(dir);
   const out = file ? probeDuration(file) : NaN;
+  if (file && o.keep) keepFile(file, o, name);
   // /usr/bin/time counts the server and the ffmpeg runs it waited for; take off what it used before the export
   const serverCpu = t.user + t.sys - res.serverBefore;
   fs.rmSync(dir, { recursive: true, force: true });
@@ -338,8 +341,14 @@ async function plainCase(o) {
   if (job.state !== 'done') throw new Error(`plain: ${job.line || job.error || 'export failed'}`);
   const t = await stopServer(s);
   const out = probeDuration(job.out);
+  if (o.keep) keepFile(job.out, o, 'plain');
   fs.rmSync(dir, { recursive: true, force: true });
   return { name: 'plain', what: `a ${D} s 1080p30 video, one cut and a colour look, re-encoded by ffmpeg`, outSeconds: out, wall, cpu: { chrome: 0, serverFfmpeg: t.user + t.sys - s0 } };
+}
+
+function keepFile(file, o, name) {
+  fs.mkdirSync(o.keep, { recursive: true });
+  fs.copyFileSync(file, path.join(o.keep, `${name}-${o.size}${path.extname(file)}`));
 }
 
 const f1 = (v) => (Number.isFinite(v) ? v.toFixed(1) : '?');
