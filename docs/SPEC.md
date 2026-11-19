@@ -421,8 +421,9 @@ the add-on (`player/lib/licence.mjs`, `pro.mjs`, `tar.mjs`; the player's `app/pr
   the add-ons. Errors are short messages; 503 when the licence server can't be reached.
 
 **The licence server** (`https://licence.motionsnip.com`): `POST /activate { key, install }` and `/refresh { licence }`
-answer `{ licence }`; `/deactivate { licence }`; `/download { licence }` answers `{ version, sha256, kid, sig, url }`,
-where `sig` signs `motionsnip-package:1:pro:<version>:<sha256>`. The package is a tar of the add-on folder (files and
+answer `{ licence }`; `/deactivate { licence }`; `/download { licence }` answers `{ name, version, released, sha256, size, kid, sig, url }`,
+where `name` is `motionsnip-pro` and `sig` is the licence key's Ed25519 signature of the canonical JSON of
+`{ name, version, released, sha256, size }`; the bytes must match `size` and `sha256`. The package is a tar of the add-on folder (files and
 folders only). It is checked, unpacked beside `<home>/addons/pro` and swapped in, so a failed update leaves the old one.
 
 **Network.** These calls happen only when you use Pro, plus one at start when a licence ends within 7 days.

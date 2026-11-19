@@ -21,7 +21,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 /** kid → the licence server's public key: raw Ed25519, base64url. */
-export const LICENCE_KEYS = {};
+export const LICENCE_KEYS = { k1: 'obw0MGPBmo6LdUoQg_UWOxgzkgcbWQm8nKQw00obnDU' };
 /** Where licences and the Pro add-on come from. */
 export const LICENCE_SERVER = 'https://licence.motionsnip.com';
 export const GRACE_DAYS = 14;

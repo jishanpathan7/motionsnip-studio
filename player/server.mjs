@@ -2653,7 +2653,8 @@ async function selftest() {
           const version = JSON.parse(readTar(fake.pkg).find((e) => e.path === 'addon.json').data).version;
           // badPackage: the bytes don't match the (signed) hash, as when a download is cut or changed on the way
           const told = fake.badPackage ? sha.replace(/^./, (c) => (c === '0' ? '1' : '0')) : sha;
-          return send(200, { version, sha256: told, kid: 't1', sig: signText(packageSigText('pro', version, told)), url: '/pkg' });
+          const m = { name: 'motionsnip-pro', version, released: '2026-11-01T00:00:00.000Z', sha256: told, size: fake.pkg.length };
+          return send(200, { ok: true, ...m, kid: 't1', sig: signText(packageSigText(m)), url: '/pkg' });
         }
         if (req.url === '/pkg') {
           res.writeHead(200, { 'content-type': 'application/x-tar' });

@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { LICENCE_KEYS, LICENCE_SERVER, hashInstall, holds, installId, readLicence, removeLicence, verifyLicence, verifySigned, writeLicence } from './licence.mjs';
+import { LICENCE_KEYS, LICENCE_SERVER, canonical, hashInstall, holds, installId, readLicence, removeLicence, verifyLicence, verifySigned, writeLicence } from './licence.mjs';
 import { readTar } from './tar.mjs';
 import { checkManifest } from './addons.mjs';
 import { httpError } from './http.mjs';
@@ -25,8 +25,10 @@ const TIMEOUT_MS = 20_000;
 const REFRESH_WITHIN = 7 * 86400e3;
 const KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{7,127}$/;
 
-/** The text a package signature covers. */
-export const packageSigText = (name, version, sha256) => `motionsnip-package:1:${name}:${version}:${sha256}`;
+/** The name the licence server gives the Pro package. */
+export const PACKAGE_NAME = 'motionsnip-pro';
+/** The text a package signature covers: the manifest's signed fields as canonical JSON (the licence key signs it too). */
+export const packageSigText = ({ name, version, released, sha256, size }) => canonical({ name, version, released, sha256, size });
 
 export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SERVER, fetch = globalThis.fetch, log = () => {} }) {
   let install = (await installId(home, { create: false })) || null;
@@ -103,10 +105,20 @@ export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SE
       const st = status();
       if (!['valid', 'grace', 'fallback'].includes(st.state)) throw httpError(409, 'Activate a Pro licence first');
       const meta = await call('/download', { licence: readLicence(home) });
-      const { version, sha256, sig, kid, url } = meta;
-      if (typeof version !== 'string' || !/^[0-9A-Za-z.+-]{1,40}$/.test(version) || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256))
+      const { name, version, released, sha256, size, sig, kid, url } = meta;
+      if (
+        name !== PACKAGE_NAME ||
+        typeof version !== 'string' ||
+        !/^[0-9A-Za-z.+-]{1,40}$/.test(version) ||
+        typeof released !== 'string' ||
+        typeof sha256 !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(sha256) ||
+        !Number.isSafeInteger(size) ||
+        size <= 0 ||
+        size > PACKAGE_MAX
+      )
         throw httpError(502, 'The licence server sent a package description that is unreadable');
-      if (!verifySigned(packageSigText(PRO_ID, version, sha256), sig, kid, keys)) throw httpError(502, "The Pro package isn't signed by MotionSnip");
+      if (!verifySigned(packageSigText({ name, version, released, sha256, size }), sig, kid, keys)) throw httpError(502, "The Pro package isn't signed by MotionSnip");
       let bytes;
       try {
         const u = new URL(url, server);
@@ -118,7 +130,7 @@ export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SE
       } catch (e) {
         throw httpError(503, `Couldn't download the Pro add-on (${e.message}). Try again.`);
       }
-      if (bytes.length > PACKAGE_MAX) throw httpError(502, 'The Pro package is too big');
+      if (bytes.length !== size) throw httpError(502, "The Pro package didn't arrive whole. Try again.");
       if (crypto.createHash('sha256').update(bytes).digest('hex') !== sha256) throw httpError(502, "The Pro package didn't arrive whole. Try again.");
       let entries;
       try {
