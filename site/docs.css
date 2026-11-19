@@ -82,11 +82,31 @@ th{color:var(--ink);font-weight:650;background:var(--panel)}
 td{color:var(--ink-2)}
 tr:last-child td{border-bottom:0}
 
+/* the Pro page's plans */
+.plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:28px 0 24px}
+.plan{display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 22px 20px}
+.plan-best{border-color:var(--cue);box-shadow:0 0 0 1px var(--cue)}
+.prose .plan p{margin:0}
+.prose .plan-name{font:500 13px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:23px}
+.tag{font:600 12px/1 var(--mono);letter-spacing:0;text-transform:none;color:var(--tape-ink);background:var(--tape);border-radius:6px;padding:5px 7px;margin:-2px 0}
+.prose .plan .price{margin:14px 0 6px;color:var(--ink)}
+.price b{font-size:44px;line-height:1;font-weight:700;letter-spacing:-.02em}
+.price span{color:var(--mute);font-size:16px}
+.prose .plan .plan-note{font-size:15px;margin-bottom:20px}
+.prose .buy{margin-top:auto;display:block;text-align:center;text-decoration:none;font:600 16px/1 var(--sans);padding:14px 18px;border-radius:11px;border:1px solid var(--line-2);color:var(--ink);transition:background .15s}
+.prose .buy:hover{background:var(--panel-2)}
+.prose .plan-best .buy{background:var(--tape);border-color:var(--tape);color:var(--tape-ink)}
+.prose .plan-best .buy:hover{background:#f2ff8a}
+.buy:focus-visible{outline:2px solid var(--cue);outline-offset:3px}
+@media (prefers-color-scheme: light){.prose .plan-best .buy{border-color:#15121d}.prose .plan-best .buy:hover{background:#dcf53a}}
+@media (prefers-reduced-motion: reduce){.buy{transition:none}}
+
 .edit{margin-top:56px;font-size:14.5px}
 .prose .edit a{color:var(--mute)}
 
 footer{margin-top:72px;padding:28px 0 48px;border-top:1px solid var(--line);color:var(--mute);font-size:14.5px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
 footer a{color:var(--ink-2)}
+footer .legal{flex-basis:100%}
 
 @media (max-width:900px){
   .docs{grid-template-columns:1fr;gap:8px;padding-top:20px}
@@ -106,4 +126,5 @@ footer a{color:var(--ink-2)}
   body{font-size:16px}
   .prose h2{font-size:24px;margin-top:44px}
   .code pre{font-size:12.5px;padding:12px 14px}
+  .plans{grid-template-columns:1fr}
 }
