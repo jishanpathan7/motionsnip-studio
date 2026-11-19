@@ -40,6 +40,7 @@ import { initOverlay, render as renderOverlay, flashCue } from './overlay.js';
 import { initPanel, render as renderPanel, uploadAudio, focusSend } from './panel.js';
 import { startCheck, sendableCount, checkSummary } from './feedback.js';
 import { initExport, updateButton as updateExportButton } from './export.js';
+import { initAddons } from './addons.js';
 import { initFavicon, setFavicon } from './favicon.js';
 import { initKeys, toggleSheet } from './keys.js';
 import { initVedit, hint as plainHint, addLogoFile } from './vedit.js';
@@ -600,6 +601,7 @@ async function boot() {
   initVedit(ui.frame);
   initPanel(ui.panel);
   initExport(ui.exportBtn);
+  initAddons({ anchor: ui.exportBtn });
   initKeys();
   initDrop();
   initOutputs(ui.outBar, ui.frame);

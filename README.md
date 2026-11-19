@@ -75,7 +75,7 @@ You can also start the player yourself on any project folder with a `reel.json`:
 node ~/.claude/skills/motionsnip-studio/player/server.mjs path/to/project
 ```
 
-Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ffmpeg /path/to/ffmpeg`.
+Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ffmpeg /path/to/ffmpeg`, `--addons <dir>` (add-ons from that folder instead of `~/.motionsnip/addons`), `--no-addons`.
 
 ## Edit any video
 
@@ -227,6 +227,7 @@ The key ideas:
 - Uploads accept only mp3, wav and m4a, up to 100 MB. The first bytes must match the file type. Names are cleaned and files are never overwritten.
 - "Show in Finder" works only for files inside the project.
 - If `reel.json` has an `export.cmd`, the render export runs that command on your machine, like an npm script. Only open projects you trust.
+- Add-ons in `~/.motionsnip/addons` run with the same rights as MotionSnip itself, like any program you install. Only install add-ons you trust. An add-on that needs a licence you don't hold stays locked: its code isn't loaded.
 
 ## Tests
 
@@ -234,7 +235,13 @@ The key ideas:
 node player/server.mjs --selftest
 ```
 
-It checks byte ranges, upload name cleaning, file type sniffing, the host and origin checks, the ffmpeg mix arguments, and runs a real upload against a temporary project. It prints `selftest ok`.
+It checks byte ranges, upload name cleaning, file type sniffing, the host and origin checks, the ffmpeg mix arguments and add-on loading, and runs a real upload against a temporary project. It prints `selftest ok`.
+
+To measure how much CPU an export costs on your machine (needs Chrome or Chromium, and ffmpeg):
+
+```bash
+node player/bench/render.mjs --size 1080 --runs 2
+```
 
 ## Troubleshooting
 
@@ -275,7 +282,8 @@ Install it (`brew install ffmpeg` on macOS), or start the server with `--ffmpeg 
 ```
 SKILL.md              the Claude Code skill
 player/server.mjs     the local server (Node 18+, no dependencies)
-player/lib/           server helpers (cutdowns, frame export)
+player/lib/           server helpers (cutdowns, frame export, add-ons)
+player/bench/         the render benchmark (CPU per minute of exported video)
 player/index.html     the player page
 player/app/           the player's scripts and styles
 player/app/scene/     the scene compiler and hand-drawn renderer (no dependencies)
@@ -286,6 +294,7 @@ docs/brand/           logo, favicons and the brand guide
 examples/demo/        a small example project (synthetic video and music)
 examples/scene-demo/  a scene project: scene.json drawn live
 examples/timeline-demo/ a timeline project: footage, a scene, titles, music and captions
+examples/addons/hello/ an example add-on: one server route and one header button
 ```
 
 ## Licence

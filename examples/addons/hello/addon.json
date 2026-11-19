@@ -1,0 +1,8 @@
+{
+  "id": "hello",
+  "name": "Hello",
+  "version": "1.0.0",
+  "core": 1,
+  "server": "server.mjs",
+  "app": "app.js"
+}

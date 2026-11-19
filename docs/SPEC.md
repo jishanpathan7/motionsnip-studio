@@ -323,6 +323,43 @@ A folder with `timeline.json` (format in SKILL.md section 11) is a timeline proj
   change from outside is reloaded when nothing is unsaved, and a 409 reloads with a message. Element prop and box
   edits on a timeline save into the files through `editHooks` instead of becoming changes for Claude.
 
+## 6c. Add-ons
+
+Optional features that live outside the core (`player/lib/addons.mjs`, `player/app/addons.js`). An add-on is a folder
+with an `addon.json`, found in `~/.motionsnip/addons/<id>/`. The folders in `MOTIONSNIP_ADDONS` (a path list), or each
+`--addons <dir>`, replace that default; `--no-addons` loads none. A server started from code loads only `opts.addons`.
+
+```jsonc
+{ "id": "hello", "name": "Hello", "version": "1.0.0", "core": 1,
+  "server": "server.mjs", "app": "app.js", "requires": "pro" }
+```
+
+- `id`: lowercase letters, digits and dashes, and the same as the folder's name.
+- `core`: the add-on API the add-on was written for. This MotionSnip has API 1; any other value isn't loaded.
+- `server` and `app`: optional, but at least one is needed. Each must be a `.mjs` or `.js` file inside the folder.
+- `requires`: a licence name. An add-on that needs a licence the user doesn't hold is **locked**: its code isn't
+  imported and its files aren't served. No licences exist yet, so such an add-on stays locked.
+
+**Server half.** `export default async function setup(addon)`, which must finish within 5 s. It gets
+`{ id, dir, version, log, helpers, route(method, name, handler) }`.
+- `route('GET' | 'POST', name, (req, res, { url }) => …)` answers `/api/addons/<id>/<name>`. These routes keep the
+  host and origin checks.
+- `helpers` has `sendJson`, `sendError`, `readJson`, `httpError`, `resolveInside`, `projectDir()` and `ffmpeg()`.
+
+**Player half.** `export default async function start(host)`, imported from `/addons/<id>/<app>`. It gets
+`{ id, name, version, store, bus, h, icon, toast, api(name, opts), url(file), addHeaderButton({ label, icon, title,
+onClick }) }`. The add-on reads `store` and listens on `bus`; it changes the project through the API.
+
+**Listing and files.**
+- `GET /api/addons` returns `{ addons: [{ id, name, version, state: 'on' | 'locked' | 'error', reason?, app? }] }`.
+- `/addons/<id>/*` serves an add-on's files only while it is on. Hidden files are never served.
+
+**Failure.** A bad manifest, another API version, an id already loaded, a setup that throws, or an app that fails to
+start: that add-on is reported and left out, and the core and the other add-ons carry on.
+
+Add-on code runs with the same rights as the core, so only install add-ons you trust. `examples/addons/hello/` is a
+working example with one route and one header button.
+
 ## 7. Brand (see docs/brand/README.md)
 
 Dark default. Bay `#15121D` (page), Bench `#211C2B` (panels), Paper `#F6F4EF` (text on dark / page on light), Ink

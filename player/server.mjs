@@ -5,6 +5,7 @@
 // project's files and a JSON API. Node 18+, no dependencies.
 //
 //   node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
+//                          [--addons <dir>]… [--no-addons]
 //   node player/server.mjs --selftest
 //
 // A folder with a reel.json is a Claude-built project. A folder without one (or a
@@ -26,6 +27,7 @@ import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoRefram
 import { toReel as sceneToReel, applyPatches as applyScenePatches, normScene } from './app/scene/compile.mjs';
 import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline, captionCues, toSrt, toVtt } from './app/comp/timeline.mjs';
 import { applyOps } from './app/comp/ops.mjs';
+import { loadAddons, addonList, defaultAddonDirs } from './lib/addons.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, buildMuxArgs, countPngs } from './lib/frames.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
@@ -1008,7 +1010,13 @@ export async function startServer(opts) {
     cut: { state: 'idle', pct: 0, line: '', id: null, label: null }, // the cutdown being made
     cutChild: null,
     takesBusy: new Set(),
+    addons: new Map(),
   };
+  // add-ons from opts.addons (folders that hold add-on folders); none unless asked for
+  ctx.addons = await loadAddons(opts.addons || [], {
+    log: opts.quiet ? () => {} : (...a) => console.log(...a),
+    helpers: { sendJson, sendError, readJson, httpError, resolveInside, projectDir: () => ctx.dir, ffmpeg: () => findFfmpeg(ctx.dir, ctx.ffmpegArg) },
+  });
   const server = http.createServer((req, res) => {
     handle(ctx, req, res).catch((err) => {
       // Our own httpError messages are short and meant for the player; anything else stays in the log.
@@ -1097,6 +1105,7 @@ async function handle(ctx, req, res) {
   if (pathname === '/' || pathname === '/index.html') return sendFile(req, res, INDEX_FILE);
   if (pathname === '/favicon.ico') return sendFile(req, res, path.join(BRAND_DIR, 'favicon.svg'));
   if (pathname.startsWith('/app/')) return serveApp(req, res, pathname.slice(5));
+  if (pathname.startsWith('/addons/')) return serveAddon(ctx, req, res, pathname.slice(8));
   if (pathname.startsWith('/p/')) return serveProject(ctx, req, res, pathname.slice(3));
   return sendError(res, 404, 'Not found');
 }
@@ -1110,6 +1119,18 @@ function serveApp(req, res, rel) {
     if (!brand) return sendError(res, 403, 'Forbidden');
     return sendFile(req, res, brand);
   }
+  return sendFile(req, res, file);
+}
+
+/** /addons/<id>/* -> a file of an add-on that is on (a locked or broken add-on's files aren't served). */
+function serveAddon(ctx, req, res, rel) {
+  const [id, ...rest] = rel.split('/');
+  const a = ctx.addons.get(id);
+  if (!a || a.state !== 'on') return sendError(res, 404, 'Not found');
+  if (rest.some((p) => p.startsWith('.'))) return sendError(res, 403, 'Forbidden');
+  const file = resolveInside(a.dir, rest.join('/'));
+  if (!file) return sendError(res, 403, 'Forbidden');
+  if (!isFile(file)) return sendError(res, 404, 'Not found');
   return sendFile(req, res, file);
 }
 
@@ -1171,8 +1192,16 @@ async function api(ctx, req, res, route, url) {
       // edits: this ffmpeg can export a plain video's trim, cuts, colour and layers
       return sendJson(res, 200, { ok: !!ff, path: ff ? ff.path : null, edits: !!(await editEncoder(ctx, ff)) });
     }
-    default:
+    case 'GET addons':
+      return sendJson(res, 200, { addons: addonList(ctx.addons) });
+    default: {
+      // /api/addons/<id>/<name>: a route an add-on registered
+      const hit = /^addons\/([^/]+)\/([^/]+)$/.exec(route);
+      const a = hit && ctx.addons.get(hit[1]);
+      const handler = a && a.state === 'on' && a.routes.get(`${m} ${hit[2]}`);
+      if (handler) return handler(req, res, { url });
       return sendError(res, 404, 'Unknown API route');
+    }
   }
 }
 
@@ -2910,6 +2939,94 @@ async function selftest() {
     await next.close();
     await new Promise((r) => blocker.close(r));
 
+    // Add-ons: discovery, manifest checks, locked add-ons, a failing setup, routes and files
+    {
+      const { checkManifest, defaultAddonDirs, ADDON_API } = await import('./lib/addons.mjs');
+      const base = mkTmp();
+      const mk = (id, manifest, files = {}) => {
+        const d = path.join(base, id);
+        fs.mkdirSync(d, { recursive: true });
+        if (manifest) fs.writeFileSync(path.join(d, 'addon.json'), typeof manifest === 'string' ? manifest : JSON.stringify(manifest));
+        for (const [f, text] of Object.entries(files)) {
+          fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true });
+          fs.writeFileSync(path.join(d, f), text);
+        }
+      };
+      const ok = (id, extra = {}) => ({ id, name: id.toUpperCase(), version: '1.0.0', core: ADDON_API, ...extra });
+      mk('hello', ok('hello', { server: 'server.mjs', app: 'app.js' }), {
+        'server.mjs': `export default (addon) => {
+          addon.route('GET', 'hi', (req, res) => addon.helpers.sendJson(res, 200, { text: 'hi from ' + addon.id, project: addon.helpers.projectDir() }));
+          addon.route('POST', 'echo', async (req, res) => addon.helpers.sendJson(res, 200, await addon.helpers.readJson(req)));
+        };`,
+        'app.js': 'export default (host) => {};',
+        '.secret': 'no',
+      });
+      mk('appy', ok('appy', { app: 'ui/app.js' }), { 'ui/app.js': 'export default () => {};' });
+      mk('paid', ok('paid', { app: 'app.js', requires: 'pro' }), { 'app.js': 'export default () => {};' });
+      mk('broken', ok('broken', { server: 'server.mjs' }), { 'server.mjs': "export default () => { throw new Error('boom'); };" });
+      mk('noexport', ok('noexport', { server: 'server.mjs' }), { 'server.mjs': 'export const x = 1;' });
+      mk('future', ok('future', { core: ADDON_API + 1, app: 'app.js' }), { 'app.js': '' });
+      mk('badjson', '{ nope');
+      mk('escape', ok('escape', { app: '../hello/app.js' }));
+      mk('wrongname', ok('other', { app: 'app.js' }), { 'app.js': '' });
+      mk('.hidden', ok('.hidden', { app: 'app.js' }), { 'app.js': '' });
+      mk('notanaddon', null, { 'readme.txt': 'no manifest' });
+
+      assert.equal(checkManifest(ok('x', { app: 'a.js' }), path.join(base, 'x')), 'app file not found: a.js');
+      assert.match(checkManifest(ok('x'), path.join(base, 'x')), /needs a server or an app/);
+      assert.match(checkManifest(ok('x', { server: 'a.txt' }), path.join(base, 'x')), /\.mjs or \.js/);
+      assert.deepEqual(defaultAddonDirs({ MOTIONSNIP_ADDONS: ['/a', '/b'].join(path.delimiter) }, '/home/u'), ['/a', '/b']);
+      assert.deepEqual(defaultAddonDirs({}, '/home/u'), [path.join('/home/u', '.motionsnip', 'addons')]);
+
+      const proj = mkTmp();
+      const srv = await startServer({ dir: proj, port: 0, open: false, quiet: true, addons: [base, path.join(base, 'missing')] });
+      try {
+        const post = { 'content-type': 'application/json', origin: `http://localhost:${srv.port}` };
+        let r = await request(srv.port, 'GET', '/api/addons');
+        assert.equal(r.status, 200);
+        const by = Object.fromEntries(r.json.addons.map((a) => [a.id, a]));
+        assert.deepEqual(Object.keys(by).sort(), ['appy', 'badjson', 'broken', 'escape', 'future', 'hello', 'noexport', 'paid', 'wrongname']);
+        assert.equal(by.hello.state, 'on');
+        assert.equal(by.hello.app, '/addons/hello/app.js');
+        assert.equal(by.appy.app, '/addons/appy/ui/app.js');
+        assert.equal(by.paid.state, 'locked');
+        assert.equal(by.paid.reason, 'Needs a pro licence');
+        assert.equal(by.paid.app, undefined, 'a locked add-on offers no app');
+        assert.equal(by.broken.state, 'error');
+        assert.match(by.broken.reason, /setup failed: boom/);
+        assert.match(by.noexport.reason, /no default export/);
+        assert.match(by.future.reason, /add-on API/);
+        assert.match(by.badjson.reason, /addon\.json/);
+        assert.match(by.escape.reason, /inside the add-on folder/);
+        assert.match(by.wrongname.reason, /doesn't match its folder/);
+
+        r = await request(srv.port, 'GET', '/api/addons/hello/hi');
+        assert.deepEqual(r.json, { text: 'hi from hello', project: proj });
+        r = await request(srv.port, 'POST', '/api/addons/hello/echo', { body: '{"a":1}', headers: post });
+        assert.deepEqual(r.json, { a: 1 });
+        r = await request(srv.port, 'POST', '/api/addons/hello/echo', { body: '{"a":1}', headers: { 'content-type': 'application/json', origin: 'http://evil.example' } });
+        assert.equal(r.status, 403, 'add-on routes keep the origin check');
+        r = await request(srv.port, 'POST', '/api/addons/hello/hi', { body: '{}', headers: post });
+        assert.equal(r.status, 404, 'method must match');
+        assert.equal((await request(srv.port, 'GET', '/api/addons/broken/x')).status, 404);
+        assert.equal((await request(srv.port, 'GET', '/api/addons/nobody/x')).status, 404);
+
+        r = await request(srv.port, 'GET', '/addons/hello/app.js');
+        assert.equal(r.status, 200);
+        assert.match(r.headers['content-type'], /javascript/);
+        assert.equal((await request(srv.port, 'GET', '/addons/hello/.secret')).status, 403);
+        assert.equal((await request(srv.port, 'GET', '/addons/hello/..%2fpaid%2fapp.js')).status, 403);
+        assert.equal((await request(srv.port, 'GET', '/addons/paid/app.js')).status, 404, "a locked add-on's files aren't served");
+        assert.equal((await request(srv.port, 'GET', '/addons/broken/server.mjs')).status, 404);
+      } finally {
+        await srv.close();
+      }
+      // no add-on folders given: none loaded
+      const bare = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true });
+      assert.deepEqual((await request(bare.port, 'GET', '/api/addons')).json, { addons: [] });
+      await bare.close();
+    }
+
     console.log('selftest ok');
     return 0;
   } catch (err) {
@@ -2926,7 +3043,7 @@ async function selftest() {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false };
+  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -2938,6 +3055,8 @@ function parseArgs(argv) {
     else if (a === '--no-open') opts.open = false;
     else if (a === '--port' || a.startsWith('--port=')) opts.port = Number(value());
     else if (a === '--ffmpeg' || a.startsWith('--ffmpeg=')) opts.ffmpeg = value();
+    else if (a === '--addons' || a.startsWith('--addons=')) (opts.addons ||= []).push(value());
+    else if (a === '--no-addons') opts.addons = [];
     else if (a === '-h' || a === '--help') opts.help = true;
     else if (a.startsWith('--')) throw new Error(`Unknown option ${a}`);
     else opts.dir = a;
@@ -2956,7 +3075,7 @@ async function main() {
   }
   if (opts.help) {
     console.log(
-      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n       node player/server.mjs --selftest',
+      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons]\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).',
     );
     return;
   }
@@ -2985,7 +3104,7 @@ async function main() {
   }
   if (opts.ffmpeg && !isExecutable(opts.ffmpeg)) console.warn(`Note: --ffmpeg ${opts.ffmpeg} is not an executable file.`);
 
-  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg });
+  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg, addons: opts.addons ?? defaultAddonDirs() });
   const stop = () => app.close().then(() => process.exit(0));
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
