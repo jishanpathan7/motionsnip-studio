@@ -55,6 +55,10 @@ const MAX_LAYERS = 40;
 const UPLOAD_LIMIT = 100 * 1024 * 1024; // 100 MB
 const VIDEO_LIMIT = 4 * 1024 * 1024 * 1024; // 4 GB, streamed to disk
 const KEEP_TAKES = 6;
+// The Pro dialog's "Get a licence" link. null (no link) until motionsnip.com/pro/ is built, which happens when
+// site/pro.json has both Polar checkout links; set it to 'https://motionsnip.com/pro/' in the same change. The
+// selftest fails when the two disagree, so the player never links to a page that isn't there.
+export const PRO_BUY_URL = null;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for --selftest)
@@ -336,6 +340,7 @@ export async function startServer(opts) {
   };
   const log = opts.quiet ? () => {} : (...a) => console.log(...a);
   // Pro: the licence in opts.home (~/.motionsnip when started from the command line); off without a home
+  ctx.proBuyUrl = opts.proBuyUrl === undefined ? PRO_BUY_URL : opts.proBuyUrl;
   ctx.pro = opts.home ? await createPro({ home: opts.home, keys: opts.licenceKeys, server: opts.licenceServer, fetch: opts.fetch, log }) : null;
   // add-ons from opts.addons (folders that hold add-on folders); none unless asked for
   ctx.addonDirs = (opts.addons || []).map((d) => path.resolve(d));
@@ -558,7 +563,7 @@ function licenceView(ctx) {
     periodEnd: st.periodEnd,
     updatesUntil: st.updatesUntil,
     addon: a ? { state: a.state, version: a.version, reason: a.reason || '' } : null,
-    buy: 'https://motionsnip.com/pro/',
+    buy: ctx.proBuyUrl,
   };
 }
 
@@ -2674,6 +2679,7 @@ async function selftest() {
         let r = await request(srv.port, 'GET', '/api/licence');
         assert.equal(r.json.state, 'none');
         assert.equal(r.json.addon, null);
+        assert.equal(r.json.buy, PRO_BUY_URL, 'the dialog links to the Pro page only when PRO_BUY_URL is set');
         assert.equal((await post('/activate', { key: 'nope' })).status, 400);
         assert.equal((await post('/activate', { key: 'GOOD-KEY-1234' }, 'http://evil.example')).status, 403);
         r = await post('/activate', { key: 'REVOKED-KEY-0000' });
@@ -2760,6 +2766,17 @@ async function selftest() {
       assert.equal(offR.status, 503);
       assert.match(offR.json.error, /Couldn't reach the licence server/);
       await off.close();
+      // the "Get a licence" link: the option reaches the dialog, and the default matches what the site builds
+      const linked = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true, home: mkTmp(), licenceKeys: keys, licenceServer: 'http://127.0.0.1:9', proBuyUrl: 'https://motionsnip.com/pro/' });
+      assert.equal((await request(linked.port, 'GET', '/api/licence')).json.buy, 'https://motionsnip.com/pro/');
+      await linked.close();
+      const docsFile = path.join(ROOT, 'site', 'docs.mjs');
+      if (fs.existsSync(docsFile)) {
+        const { readPro } = await import(docsFile);
+        const sitePro = readPro(path.join(ROOT, 'site', 'pro.json'));
+        if (sitePro) assert.equal(PRO_BUY_URL, 'https://motionsnip.com/pro/', 'site/pro.json builds /pro/: set PRO_BUY_URL so the Pro dialog links to it');
+        else assert.equal(PRO_BUY_URL, null, 'PRO_BUY_URL links to /pro/, but the site has no Pro page (site/pro.json has no checkout links)');
+      }
       await new Promise((r) => fakeSrv.close(r));
       // no home (how the selftest's other servers run): no licence routes
       const noPro = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true });
