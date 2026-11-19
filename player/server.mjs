@@ -1579,9 +1579,20 @@ async function apiFramesPush(ctx, req, res, url) {
   const j = framesJob(ctx, url);
   const buf = await readBody(req, FRAMES_LIMIT);
   if (j.failed) throw httpError(500, j.failed);
+  // ?from=i (raw frames): the index of the first frame in this push, so a push the page sends again after a failed
+  // request doesn't add its frames twice. Frames the server already has are skipped; a gap is an error.
+  const fromRaw = url.searchParams.get('from');
+  const from = fromRaw == null ? null : Math.round(num(fromRaw, NaN));
+  if (from != null) {
+    if (!j.frameBytes) throw httpError(400, '?from= is for raw frames');
+    if (!(from >= 0)) throw httpError(400, 'Bad ?from=');
+    if (from > j.got) throw httpError(400, `Frames missing: the server has ${j.got}, this push starts at ${from}`);
+  }
+  const already = from == null ? 0 : j.got - from;
   // ?repeat=n: the last frame again n times (a still stretch costs no upload)
-  const repeat = Math.min(Math.max(0, Math.round(num(url.searchParams.get('repeat'), 0))), j.total - j.got);
-  if (repeat) {
+  const asked = Math.max(0, Math.round(num(url.searchParams.get('repeat'), 0)));
+  const repeat = Math.min(Math.max(0, asked - already), j.total - j.got);
+  if (asked) {
     if (!j.frameBytes || !j.lastFrame) throw httpError(400, 'Nothing to repeat');
     j.last = Date.now();
     for (let i = 0; i < repeat; i++) if (!j.child.stdin.write(j.lastFrame)) await new Promise((r) => j.child.stdin.once('drain', r));
@@ -1592,12 +1603,15 @@ async function apiFramesPush(ctx, req, res, url) {
       if (buf.length % j.frameBytes) throw httpError(400, `Raw frames must be ${j.frameBytes} bytes each`);
     } else if (buf.readUInt32BE(0) !== 0x89504e47) throw httpError(400, 'Frames must be PNG');
     j.last = Date.now();
-    const ok = j.child.stdin.write(buf);
-    if (!ok) await new Promise((r) => j.child.stdin.once('drain', r));
-    if (j.frameBytes) {
-      j.got += buf.length / j.frameBytes;
-      j.lastFrame = Buffer.from(buf.subarray(buf.length - j.frameBytes));
-    } else j.got += countPngs(buf);
+    const fresh = already > 0 ? buf.subarray(Math.min(buf.length, already * j.frameBytes)) : buf;
+    if (fresh.length) {
+      const ok = j.child.stdin.write(fresh);
+      if (!ok) await new Promise((r) => j.child.stdin.once('drain', r));
+      if (j.frameBytes) {
+        j.got += fresh.length / j.frameBytes;
+        j.lastFrame = Buffer.from(fresh.subarray(fresh.length - j.frameBytes));
+      } else j.got += countPngs(fresh);
+    }
   }
   setJob(ctx, { pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
   if (j.failed) throw httpError(500, j.failed);
@@ -3005,8 +3019,19 @@ async function selftest() {
         assert.equal(r.status, 400, 'nothing to repeat yet');
         r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}`, { body: Buffer.alloc(100), headers: post });
         assert.equal(r.status, 400, 'raw frames are whole frames');
-        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}`, { body: Buffer.concat([rawFrame(0), rawFrame(80), rawFrame(160)]), headers: post });
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&from=0`, { body: Buffer.concat([rawFrame(0), rawFrame(80), rawFrame(160)]), headers: post });
         assert.equal(r.json.got, 3);
+        // a push sent again after a failed request: frames the server has are skipped, a gap is refused
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&from=0`, { body: Buffer.concat([rawFrame(0), rawFrame(80), rawFrame(160)]), headers: post });
+        assert.equal(r.json.got, 3, 'the same push twice adds nothing');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&from=2`, { body: Buffer.concat([rawFrame(160), rawFrame(200)]), headers: post });
+        assert.equal(r.json.got, 4, 'an overlapping push adds only the new frame');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&from=6`, { body: rawFrame(0), headers: post });
+        assert.equal(r.status, 400, 'a gap is refused');
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&repeat=2&from=4`, { body: '', headers: post });
+        assert.equal(r.json.got, 6);
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&repeat=2&from=4`, { body: '', headers: post });
+        assert.equal(r.json.got, 6, 'a repeat sent twice adds nothing');
         r = await request(fs2.port, 'POST', `/api/frames-push?job=${rj}&repeat=99`, { body: '', headers: post });
         assert.equal(r.json.got, 10, 'repeats stop at the frame count');
         r = await request(fs2.port, 'POST', `/api/frames-end?job=${rj}`, { body: '{}', headers: post });
