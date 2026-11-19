@@ -138,7 +138,9 @@ node player/server.mjs --selftest
   `{ w, h, fps, frames, format, audio: [{ src, at, in, out, gain, fadeIn, fadeOut }], setSrc, captions, pix?, compose? }`
   → `{ job, composed }`;
   `POST /api/frames-push?job=` with PNGs back to back, or with `pix: "rgba"` raw RGBA frames (w×h×4 bytes each);
-  `?repeat=n` sends the last frame again n times. `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
+  `?repeat=n` sends the last frame again n times. With raw frames, `?from=i` gives the index of the push's first frame:
+  frames the server already has are skipped and a gap is a 400, so the player can send a push again when a request
+  fails without an answer (it then sends plain bytes instead of a Blob, for browsers that run out of blob memory). `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
   time, abandoned after 20 s without frames. ffmpeg encodes the picture first, then mixes the audio clips under it in a
   second pass with the picture copied (clips with no sound track are skipped).
   `setSrc` makes the export the project's video; `captions` writes `<export>.srt` and `.vtt` from the timeline's captions.

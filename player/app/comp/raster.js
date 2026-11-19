@@ -152,23 +152,47 @@ export async function exportFrames(draw, opts) {
   const batch = [];
   let repeats = 0;
   let prev = null;
+  let next = 0; // the index of the next frame to send (drawn or repeated)
+  let blobs = true;
   let sending = Promise.resolve();
+  // One push, sent again when the request fails without an answer. A Blob uploads several times faster than the
+  // same bytes as a typed array, but a browser with little blob memory (the desktop app's browser) can refuse to make
+  // one (ERR_BLOB_OUT_OF_MEMORY, which fetch reports as "Failed to fetch"); after that, pushes go as plain bytes.
+  // ?from= tells the server where the push starts, so frames it already has are not added twice.
+  const push = async (query, parts) => {
+    for (let attempt = 0; ; attempt++) {
+      if (opts.signal?.aborted) throw new Error('Cancelled');
+      const body = !parts.length ? new Uint8Array(0) : blobs ? new Blob(parts) : joined(parts);
+      try {
+        return await post(`/api/frames-push?job=${job}&${query}`, body, false);
+      } catch (e) {
+        if (e.status || attempt >= 3) throw e; // the server answered: not a transport failure
+        if (blobs) console.warn('[motionsnip] a frame upload failed; sending again as plain bytes:', e.message);
+        blobs = false;
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      }
+    }
+  };
   // requests go out in order, at most one in flight
-  const send = (url, body) => {
-    sending = sending.then(() => post(url, body, false));
+  const send = (fn) => {
+    sending = sending.then(fn);
     return sending;
   };
-  // a Blob uploads several times faster than the same bytes as a typed array; small batches, one in flight,
-  // keep the browser's blob store from filling up
+  // small batches, one in flight, keep the browser's blob store from filling up
   const flushFrames = () => {
     if (!batch.length) return sending;
-    return send(`/api/frames-push?job=${job}`, new Blob(batch.splice(0)));
+    const parts = batch.splice(0);
+    const from = next;
+    next += parts.length;
+    return send(() => push(`from=${from}`, parts));
   };
   const flushRepeats = () => {
     if (!repeats) return sending;
     const n = repeats;
+    const from = next;
     repeats = 0;
-    return send(`/api/frames-push?job=${job}&repeat=${n}`, new Uint8Array(0));
+    next += n;
+    return send(() => push(`repeat=${n}&from=${from}`, []));
   };
   try {
     for (let i = 0; i < start.frames; i++) {
@@ -201,6 +225,17 @@ export async function exportFrames(draw, opts) {
     await post(`/api/frames-end?job=${job}&cancel=1`, '{}').catch(() => {});
     throw e;
   }
+}
+
+/** Byte arrays → one Uint8Array. */
+function joined(parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(new Uint8Array(p.buffer, p.byteOffset, p.byteLength), at);
+    at += p.byteLength;
+  }
+  return out;
 }
 
 function sameWords(a, b) {
