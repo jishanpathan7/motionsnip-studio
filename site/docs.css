@@ -1,0 +1,109 @@
+/* The docs and install pages. Same tokens and type as the landing page (site/index.html). */
+:root{
+  --bg:#15121d; --panel:#211c2b; --panel-2:#2a2436; --line:#2f2840; --line-2:#3e3552;
+  --ink:#f6f4ef; --ink-2:#cfcad8; --mute:#a49db3;
+  --cue:#ff4fa8; --tape:#e8ff47; --tape-ink:#15121d; --sky:#6cc8ff;
+  --sans:"Bricolage Grotesque",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"DM Mono","SF Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{--bg:#f6f4ef; --panel:#fff; --panel-2:#efece5; --line:#e4e0d7; --line-2:#cfcac0;
+    --ink:#15121d; --ink-2:#3a3446; --mute:#6a6378; --cue:#c2185b; --sky:#0277bd}
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-padding-top:24px}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 17px/1.6 var(--sans)}
+a{color:inherit}
+img{max-width:100%;height:auto}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+
+/* header */
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 0;border-bottom:1px solid var(--line)}
+.top .logo{height:34px;width:auto;display:block}
+.top nav{display:flex;gap:4px;align-items:center}
+.top nav a{text-decoration:none;color:var(--ink-2);font-weight:500;font-size:15px;padding:8px 12px;border-radius:9px}
+.top nav a:hover{background:var(--panel-2);color:var(--ink)}
+.top nav a[aria-current]{color:var(--ink);background:var(--panel-2)}
+.logo-light{display:none !important}
+@media (prefers-color-scheme: light){.logo-dark{display:none !important}.logo-light{display:block !important}}
+
+/* layout: sidebar and text */
+.docs{display:grid;grid-template-columns:220px minmax(0,1fr);gap:56px;padding-top:40px}
+aside{position:sticky;top:24px;align-self:start;max-height:calc(100vh - 48px);overflow:auto;padding-bottom:24px}
+.pages{display:grid;gap:2px;margin-bottom:28px}
+.pages a,.toc a{text-decoration:none;border-radius:8px;padding:6px 10px;color:var(--ink-2)}
+.pages a{font-weight:600;font-size:15.5px}
+.pages a:hover,.toc a:hover{background:var(--panel-2);color:var(--ink)}
+.pages a[aria-current]{background:var(--panel);color:var(--ink);box-shadow:inset 3px 0 0 var(--cue)}
+.toc{display:grid;gap:0}
+.toc p{margin:0 0 6px 10px;font:500 12px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mute)}
+.toc a{font-size:14px;line-height:1.35}
+.toc code{font-size:12.5px}
+
+/* text */
+.prose{min-width:0;max-width:760px}
+.prose h1{font-size:clamp(34px,5vw,48px);line-height:1.08;letter-spacing:-.02em;margin:0 0 24px;font-weight:700}
+.prose h2{font-size:28px;line-height:1.2;letter-spacing:-.01em;margin:56px 0 14px;padding-top:4px;font-weight:700}
+.prose h3{font-size:20px;line-height:1.3;margin:36px 0 10px;font-weight:700}
+.prose h4{font-size:17px;margin:28px 0 8px}
+.prose h1,.prose h2,.prose h3,.prose h4{position:relative;overflow-wrap:anywhere}
+.anchor{position:absolute;left:-1.1em;padding-right:.3em;color:var(--mute);text-decoration:none;opacity:0;font-weight:400}
+.prose :is(h2,h3,h4):hover .anchor{opacity:1}
+.prose p,.prose li{color:var(--ink-2)}
+.prose p{margin:0 0 16px}
+.prose strong{color:var(--ink);font-weight:650}
+.prose a{color:var(--ink);text-decoration:underline;text-decoration-color:var(--line-2);text-underline-offset:3px}
+.prose a:hover{text-decoration-color:var(--cue)}
+.prose ul,.prose ol{margin:0 0 18px;padding-left:24px}
+.prose li{margin:5px 0}
+.prose li>ul,.prose li>ol{margin:6px 0 0}
+.prose li::marker{color:var(--mute)}
+.prose hr{border:0;border-top:1px solid var(--line);margin:40px 0}
+.prose img{display:block;border-radius:12px;border:1px solid var(--line);margin:8px 0 24px}
+.prose picture img{width:100%}
+.prose code{font:400 .86em/1.4 var(--mono);background:var(--panel-2);border-radius:5px;padding:2px 5px;overflow-wrap:anywhere}
+.prose blockquote{margin:0 0 18px;padding:12px 16px;border-left:3px solid var(--cue);background:var(--panel);border-radius:0 10px 10px 0}
+.prose blockquote p:last-child{margin:0}
+
+/* code blocks: always dark, like the landing page terminal */
+.code{background:#0f0d15;color:#f6f4ef;border:1px solid #2f2840;border-radius:12px;margin:0 0 20px;overflow:hidden}
+.code-bar{display:flex;justify-content:space-between;align-items:center;padding:7px 10px 7px 14px;border-bottom:1px solid #2f2840;color:#a49db3;font:400 12px/1 var(--mono)}
+.code pre{margin:0;padding:14px 16px;overflow-x:auto;font:400 14px/1.6 var(--mono);tab-size:2}
+.code pre code{all:unset;white-space:pre}
+.code.is-shell pre code{white-space:pre-wrap;overflow-wrap:anywhere}
+.copy{all:unset;cursor:pointer;font:500 12px/1 var(--mono);color:#15121d;background:#e8ff47;border-radius:6px;padding:6px 9px}
+.copy:focus-visible{outline:2px solid var(--sky);outline-offset:2px}
+
+/* tables scroll inside themselves, never the page */
+.table{overflow-x:auto;margin:0 0 20px;border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--line)}
+th{color:var(--ink);font-weight:650;background:var(--panel)}
+td{color:var(--ink-2)}
+tr:last-child td{border-bottom:0}
+
+.edit{margin-top:56px;font-size:14.5px}
+.prose .edit a{color:var(--mute)}
+
+footer{margin-top:72px;padding:28px 0 48px;border-top:1px solid var(--line);color:var(--mute);font-size:14.5px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+footer a{color:var(--ink-2)}
+
+@media (max-width:900px){
+  .docs{grid-template-columns:1fr;gap:8px;padding-top:20px}
+  aside{position:static;max-height:none;overflow:visible;padding:0}
+  .pages{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+  .pages a{border:1px solid var(--line);font-size:14.5px}
+  .pages a[aria-current]{box-shadow:none;border-color:var(--cue)}
+  .toc{display:none}
+  .anchor{display:none}
+}
+@media (max-width:600px){
+  .wrap{padding:0 16px}
+  .top{padding:14px 0}
+  .top .logo{height:26px}
+  .top nav a{padding:7px 9px;font-size:14.5px}
+  .top nav a.hide-sm{display:none}
+  body{font-size:16px}
+  .prose h2{font-size:24px;margin-top:44px}
+  .code pre{font-size:12.5px;padding:12px 14px}
+}
