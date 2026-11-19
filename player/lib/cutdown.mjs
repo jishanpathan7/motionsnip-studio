@@ -7,8 +7,6 @@
 //
 // MIT licence. Copyright (c) 2026 Jishan Pathan.
 
-import fs from 'node:fs';
-import path from 'node:path';
 import { PRESETS, cropSize, normKeys, normRanges, outputSlug, autoReframe, autoRanges, normalizeReel } from '../app/reel.mjs';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -81,24 +79,17 @@ export const CUTDOWN_FILTERS = ['setsar'];
 
 // ---------------------------------------------------------------- the player's outputs list
 
-const listFile = (dir) => path.join(dir, '.motionsnip', 'outputs.json');
+/** Where a project keeps the cutdowns made in the player (in its ProjectStore). */
+export const OUTPUTS_FILE = '.motionsnip/outputs.json';
 
 /** The cutdowns made in the player (raw entries), or []. */
-export function readPlayerOutputs(dir) {
-  try {
-    const data = JSON.parse(fs.readFileSync(listFile(dir), 'utf8'));
-    return (Array.isArray(data?.outputs) ? data.outputs : []).filter((o) => o && typeof o === 'object' && typeof o.id === 'string');
-  } catch {
-    return [];
-  }
+export async function readPlayerOutputs(store) {
+  const data = await store.readJson(OUTPUTS_FILE);
+  return (Array.isArray(data?.outputs) ? data.outputs : []).filter((o) => o && typeof o === 'object' && typeof o.id === 'string');
 }
 
-export function writePlayerOutputs(dir, list) {
-  const file = listFile(dir);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ outputs: list }, null, 2) + '\n');
-  fs.renameSync(tmp, file);
+export function writePlayerOutputs(store, list) {
+  return store.writeText(OUTPUTS_FILE, JSON.stringify({ outputs: list }, null, 2) + '\n');
 }
 
 /** reel.json's outputs, then the player's (marked by: 'player'); an id in both is Claude's. */

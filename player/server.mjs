@@ -22,7 +22,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { reframeSpec, reframeGraph, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
+import { reframeSpec, keyExpr, CUTDOWN_FILTERS, readPlayerOutputs, writePlayerOutputs, mergeOutputs, planCutdown } from './lib/cutdown.mjs';
 import { normalizeReel, resolveOutput, outTime, masterTime, cropSize, autoReframe, autoRanges } from './app/reel.mjs';
 import { toReel as sceneToReel, applyPatches as applyScenePatches, normScene } from './app/scene/compile.mjs';
 import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline, captionCues, toSrt, toVtt } from './app/comp/timeline.mjs';
@@ -30,8 +30,9 @@ import { applyOps } from './app/comp/ops.mjs';
 import { loadAddons, addonList, defaultAddonDirs } from './lib/addons.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, buildMuxArgs, countPngs } from './lib/frames.mjs';
 import { normComposeSpec, buildComposeArgs } from './lib/compose.mjs';
-import { JSON_LIMIT, MIME, extOf, mimeFor, parseRange, hostAllowed, originAllowed, readBody, readJson, httpError, BASE_HEADERS, sendJson, sendError, sendFile } from './lib/http.mjs';
-import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, cleanName, numberedName, sniffAudio, sniffImage, sniffVideo, resolveInside, parseReel, stripJsonComments, slug, stamp, isFile, isExecutable, freePath, writeAtomic } from './lib/files.mjs';
+import { JSON_LIMIT, extOf, mimeFor, parseRange, hostAllowed, originAllowed, readBody, readJson, httpError, sendJson, sendError, sendFile } from './lib/http.mjs';
+import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, cleanName, numberedName, sniffAudio, sniffImage, sniffVideo, resolveInside, parseReel, slug, stamp, isFile, isExecutable } from './lib/files.mjs';
+import { localStore, META } from './lib/store.mjs';
 import { EDIT_FILTERS, parseProbe, progressFromText, buildMixArgs, within, keepRanges, normLook, lookMatrix, lookFilter, buildEditArgs, pickEditEncoder, run, findFfmpeg, ffmpegEnv, probe, lastLine } from './lib/media.mjs';
 // moved to lib/ and still exported from here, for the selftest and anything that imported them
 export { EDIT_FILTERS, buildEditArgs, buildMixArgs, cleanName, extOf, findFfmpeg, hostAllowed, keepRanges, lookFilter, lookMatrix, mimeFor, normLook, numberedName, originAllowed, parseProbe, parseRange, parseReel, pickEditEncoder, progressFromText, resolveInside, slug, sniffAudio, sniffImage, sniffVideo, stamp };
@@ -57,23 +58,13 @@ const KEEP_TAKES = 6;
 
 const num = (v, fallback) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : fallback);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-const fmt = (v) => String(Math.round(v * 1000) / 1000); // trims float noise in filter strings
-
-// ---------------------------------------------------------------------------
-// Editing a plain video: trim, cuts, colour, blur boxes, text and logo layers
-// ---------------------------------------------------------------------------
-
-const n3 = (v) => Math.round(Number(v) * 1000) / 1000;
-
-/** Filters an edit export needs. Some trimmed builds (Remotion's) leave many of them out. */
-
-// ---------------------------------------------------------------------------
-// Small IO helpers
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // ffmpeg
 // ---------------------------------------------------------------------------
+
+/** The ffmpeg this server uses: --ffmpeg, else one on PATH, else one a Remotion project bundles. */
+const ffmpegFor = (ctx) => findFfmpeg(ctx.store.root, ctx.ffmpegArg);
 
 /** Which H.264 encoder this ffmpeg can export edits with (null: it can't). Cached per binary. */
 async function editEncoder(ctx, ff) {
@@ -90,24 +81,12 @@ async function editEncoder(ctx, ff) {
 // Plain videos (a folder with no reel.json)
 // ---------------------------------------------------------------------------
 
-/** The video to open in a folder with no reel.json: the newest playable one at the top level, or null. */
-export function pickVideo(dir) {
+/** The video to open in a project with no reel.json: the newest playable one at the top level, or null. */
+export async function pickVideo(store) {
   let best = null;
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const e of entries) {
-    if (!e.isFile() || e.name.startsWith('.') || !VIDEO_EXTS.includes(extOf(e.name))) continue;
-    let m = 0;
-    try {
-      m = fs.statSync(path.join(dir, e.name)).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (!best || m > best.m) best = { name: e.name, m };
+  for (const e of await store.list('')) {
+    if (!e.file || e.name.startsWith('.') || !VIDEO_EXTS.includes(extOf(e.name))) continue;
+    if (!best || e.mtimeMs > best.m) best = { name: e.name, m: e.mtimeMs };
   }
   return best ? best.name : null;
 }
@@ -117,23 +96,16 @@ export function pickVideo(dir) {
  * same name), counted once the file has stopped changing for 2 s. Kept in .motionsnip/video.json.
  * Opening a different video in the same folder starts again at 1 and drops the old takes.
  */
-export function videoVersion(dir, name, stat, now = Date.now()) {
-  const file = path.join(dir, '.motionsnip', 'video.json');
+export async function videoVersion(store, name, stat, now = Date.now()) {
   const sig = `${stat.size}:${Math.round(stat.mtimeMs)}`;
-  let saved = {};
-  try {
-    saved = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
-  } catch {}
+  const saved = (await store.readJson(`${META}/video.json`)) || {};
   const same = saved.src === name;
   const ver = Math.max(1, Math.floor(Number(saved.version)) || 1);
   if (same && (saved.sig === sig || now - stat.mtimeMs < 2000)) return ver;
   const version = same ? ver + 1 : 1;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    if (!same && saved.src) fs.rmSync(path.join(dir, '.motionsnip', 'takes'), { recursive: true, force: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ src: name, sig, version }));
-    fs.renameSync(tmp, file);
+    if (!same && saved.src) await store.remove(`${META}/takes`, { recursive: true });
+    await store.writeText(`${META}/video.json`, JSON.stringify({ src: name, sig, version }));
   } catch {
     /* a read-only folder still plays; it just can't count versions */
   }
@@ -142,18 +114,15 @@ export function videoVersion(dir, name, stat, now = Date.now()) {
 
 /** Make up a reel from the video itself. */
 async function plainReel(ctx) {
-  const name = ctx.video || pickVideo(ctx.dir);
-  if (!name) throw httpError(404, `No reel.json or video file in ${ctx.dir}`);
-  const file = path.join(ctx.dir, name);
-  let stat;
-  try {
-    stat = fs.statSync(file);
-  } catch {
-    throw httpError(404, `Video not found: ${file}`);
-  }
+  const { store } = ctx;
+  const name = ctx.video || (await pickVideo(store));
+  if (!name) throw httpError(404, `No reel.json or video file in ${store.root}`);
+  const file = store.path(name);
+  const stat = await store.stat(name);
+  if (!stat?.file) throw httpError(404, `Video not found: ${file}`);
   const sig = `${file}:${stat.size}:${stat.mtimeMs}`;
   if (ctx.probed?.sig !== sig) {
-    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    const ff = ffmpegFor(ctx);
     ctx.probed = { sig, info: ff ? await probe(ff, file) : {} };
   }
   const info = ctx.probed.info;
@@ -161,9 +130,9 @@ async function plainReel(ctx) {
   const reel = {
     id: `${slug(stem)}-${crypto.createHash('sha1').update(file).digest('hex').slice(0, 6)}`,
     title: name,
-    version: videoVersion(ctx.dir, name, stat),
+    version: await videoVersion(store, name, stat),
     src: name,
-    path: ctx.dir,
+    path: store.root,
     file,
     plain: true,
     audio: { videoAudio: 'mix' }, // its sound is the whole soundtrack, not effects
@@ -182,36 +151,36 @@ async function plainReel(ctx) {
  * A scene project (scene.json, no reel.json): the reel is built from the scene, the way plainReel makes one up
  * for a video. The player draws it live; "src" is the last export, when there is one.
  */
-function sceneReel(ctx) {
-  const file = path.join(ctx.dir, 'scene.json');
+async function sceneReel(ctx) {
+  const { store } = ctx;
   let raw;
   try {
-    raw = parseReel(fs.readFileSync(file, 'utf8'));
+    raw = parseReel((await store.readText('scene.json')) ?? '');
   } catch (err) {
     throw httpError(500, `scene.json is not valid JSON: ${err.message}`);
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(500, 'scene.json must be a JSON object');
-  const src = typeof raw.src === 'string' && raw.src && isFile(path.join(ctx.dir, raw.src)) ? raw.src : lastRender(ctx, raw.version);
+  const src = typeof raw.src === 'string' && raw.src && (await store.file(raw.src)) ? raw.src : await lastRender(ctx, raw.version);
   const reel = sceneToReel(raw, { src });
-  reel.path = ctx.dir;
-  reel.file = file;
+  reel.path = store.root;
+  reel.file = store.path('scene.json');
   return reel;
 }
 
+/** Where a scene's or timeline's last export is remembered (scene.json stays Claude's file). */
+const RENDER_FILE = `${META}/render.json`;
+
 /** The last export of this version, so takes, compare and cutdowns have a video ('' when there is none). */
-function lastRender(ctx, version) {
-  try {
-    const r = JSON.parse(fs.readFileSync(renderFile(ctx), 'utf8'));
-    if (r && r.version === (Number(version) || 1) && typeof r.src === 'string' && isFile(path.join(ctx.dir, r.src))) return r.src;
-  } catch {}
+async function lastRender(ctx, version) {
+  const r = await ctx.store.readJson(RENDER_FILE);
+  if (r && r.version === (Number(version) || 1) && typeof r.src === 'string' && (await ctx.store.file(r.src))) return r.src;
   return '';
 }
 
-/** A project file as JSON: { raw, text, rev } where rev is a short hash of the text (who saved last). */
-function readProjectFile(ctx, rel) {
-  const file = resolveInside(ctx.dir, rel);
-  if (!file || !isFile(file)) throw httpError(404, `${rel} not found`);
-  const text = fs.readFileSync(file, 'utf8');
+/** A project file as JSON: { file, raw, text, rev } where rev is a short hash of the text (who saved last). */
+async function readProjectFile(ctx, rel) {
+  const text = await ctx.store.readText(rel);
+  if (text == null) throw httpError(404, `${rel} not found`);
   let raw;
   try {
     raw = parseReel(text);
@@ -219,18 +188,18 @@ function readProjectFile(ctx, rel) {
     throw httpError(500, `${rel} is not valid JSON: ${err.message}`);
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(500, `${rel} must be a JSON object`);
-  return { file, raw, text, rev: crypto.createHash('sha1').update(text).digest('hex').slice(0, 12) };
+  return { file: ctx.store.path(rel), raw, text, rev: crypto.createHash('sha1').update(text).digest('hex').slice(0, 12) };
 }
 
 /** The scene files a timeline's scene clips use: { 'scene.json': raw }. Unreadable ones are left out (lint says so). */
-function timelineScenes(ctx, raw) {
+async function timelineScenes(ctx, raw) {
   const out = {};
   for (const t of Array.isArray(raw.tracks) ? raw.tracks : [])
     for (const c of t?.kind === 'scene' && Array.isArray(t.clips) ? t.clips : []) {
       const rel = typeof c?.scene === 'string' && c.scene ? c.scene : 'scene.json';
       if (rel in out || !rel.endsWith('.json')) continue;
       try {
-        out[rel] = readProjectFile(ctx, rel).raw;
+        out[rel] = (await readProjectFile(ctx, rel)).raw;
       } catch {}
     }
   return out;
@@ -240,35 +209,25 @@ function timelineScenes(ctx, raw) {
  * A timeline project (timeline.json, no reel.json): the reel is built from the composition. The player draws it
  * live; "src" is the last export of this version. rev is timeline.json's, depsRev the scene files'.
  */
-function timelineReel(ctx) {
-  const { raw, rev, file } = readProjectFile(ctx, 'timeline.json');
-  const scenes = timelineScenes(ctx, raw);
-  const exists = (rel) => {
-    const f = resolveInside(ctx.dir, rel);
-    return !!f && isFile(f);
-  };
-  const reel = timelineToReel(raw, { scenes, src: lastRender(ctx, raw.version), exists });
+async function timelineReel(ctx) {
+  const { raw, rev, file } = await readProjectFile(ctx, 'timeline.json');
+  const scenes = await timelineScenes(ctx, raw);
+  // which media files are there, for lint (asked once each, up front: the compiler is synchronous)
+  const media = new Set();
+  for (const t of Array.isArray(raw.tracks) ? raw.tracks : [])
+    for (const c of Array.isArray(t?.clips) ? t.clips : []) if (typeof c?.src === 'string' && c.src && (await ctx.store.file(c.src))) media.add(c.src);
+  const reel = timelineToReel(raw, { scenes, src: await lastRender(ctx, raw.version), exists: (rel) => media.has(rel) });
   reel.rev = rev; // the base for the editor's saves
   reel.depsRev = crypto.createHash('sha1').update(JSON.stringify(scenes)).digest('hex').slice(0, 12); // the scenes it uses
-  reel.path = ctx.dir;
+  reel.path = ctx.store.root;
   reel.file = file;
   return reel;
 }
 
-/**
- * Write the player's edits into timeline.json or a scene file, without Claude.
- * body: { file, base?, bump?, patches?: [{ path, value }], ops?: [...] (timeline only), content?: {...} (a whole copy: undo) }
- *   base: the rev the edit was made on; a different file on disk is a 409 (reload, then edit again).
- *   bump: start a new version (Apply); plain editor saves keep the version.
- */
 /** The video a timeline.json was made from ("Open in timeline"), or null. */
-function timelineFrom(ctx) {
-  try {
-    const from = JSON.parse(fs.readFileSync(path.join(ctx.dir, 'timeline.json'), 'utf8'))?.from;
-    return typeof from === 'string' ? from : null;
-  } catch {
-    return null;
-  }
+async function timelineFrom(ctx) {
+  const from = (await ctx.store.readJson('timeline.json'))?.from;
+  return typeof from === 'string' ? from : null;
 }
 
 /** "Open in timeline": the plain video and its edits, converted by the player, become the folder's timeline.json. */
@@ -285,7 +244,7 @@ async function apiTimelineOpen(ctx, req, res) {
     throw httpError(400, err.message);
   }
   try {
-    fs.writeFileSync(path.join(ctx.dir, 'timeline.json'), JSON.stringify(tl, null, 2) + '\n', { flag: 'wx' });
+    await ctx.store.writeText('timeline.json', JSON.stringify(tl, null, 2) + '\n', { create: true });
   } catch (err) {
     if (err.code === 'EEXIST') throw httpError(409, 'This folder already has a timeline.json');
     throw err;
@@ -293,6 +252,12 @@ async function apiTimelineOpen(ctx, req, res) {
   return sendJson(res, 200, { ok: true, file: 'timeline.json' });
 }
 
+/**
+ * Write the player's edits into timeline.json or a scene file, without Claude.
+ * body: { file, base?, bump?, patches?: [{ path, value }], ops?: [...] (timeline only), content?: {...} (a whole copy: undo) }
+ *   base: the rev the edit was made on; a different file on disk is a 409 (reload, then edit again).
+ *   bump: start a new version (Apply); plain editor saves keep the version.
+ */
 async function apiProjectApply(ctx, req, res) {
   const body = (await readJson(req)) || {};
   const rel = typeof body.file === 'string' ? body.file : '';
@@ -300,15 +265,15 @@ async function apiProjectApply(ctx, req, res) {
   if (!isTimeline) {
     // a scene file: scene.json, or one the timeline uses
     let ok = rel === 'scene.json';
-    if (!ok && rel.endsWith('.json') && isFile(path.join(ctx.dir, 'timeline.json'))) ok = rel in timelineScenes(ctx, readProjectFile(ctx, 'timeline.json').raw);
+    if (!ok && rel.endsWith('.json') && (await ctx.store.file('timeline.json'))) ok = rel in (await timelineScenes(ctx, (await readProjectFile(ctx, 'timeline.json')).raw));
     if (!ok) throw httpError(400, `Can't edit ${rel || 'that file'} here`);
   }
-  const cur = readProjectFile(ctx, rel);
+  const cur = await readProjectFile(ctx, rel);
   if (body.base && body.base !== cur.rev) return sendJson(res, 409, { error: `${rel} changed since you started this edit`, rev: cur.rev });
   let out = cur.raw;
   try {
     if (isTimeline) {
-      const scenes = timelineScenes(ctx, cur.raw);
+      const scenes = await timelineScenes(ctx, cur.raw);
       const whole = body.content !== undefined ? body.content : body.timeline;
       if (whole !== undefined) {
         if (!whole || typeof whole !== 'object' || Array.isArray(whole)) throw new Error('timeline must be a JSON object');
@@ -331,7 +296,7 @@ async function apiProjectApply(ctx, req, res) {
   }
   if (body.bump) out = { ...out, version: (Math.round(Number(out.version)) || 1) + 1 };
   const text = JSON.stringify(out, null, 2) + '\n';
-  await writeAtomic(cur.file, text);
+  await ctx.store.writeText(rel, text);
   return sendJson(res, 200, { ok: true, rev: crypto.createHash('sha1').update(text).digest('hex').slice(0, 12), version: Number(out.version) || 1 });
 }
 
@@ -345,9 +310,9 @@ async function apiProjectApply(ctx, req, res) {
  *   video: a file name in dir to open as a plain video (else the newest video there, when there's no reel.json)
  */
 export async function startServer(opts) {
-  const dir = path.resolve(opts.dir);
+  const store = opts.store || localStore(opts.dir);
   const ctx = {
-    dir,
+    store, // the project's files (lib/store.mjs)
     port: 0,
     ffmpegArg: opts.ffmpeg || null,
     video: opts.video || null,
@@ -365,7 +330,7 @@ export async function startServer(opts) {
   // add-ons from opts.addons (folders that hold add-on folders); none unless asked for
   ctx.addons = await loadAddons(opts.addons || [], {
     log: opts.quiet ? () => {} : (...a) => console.log(...a),
-    helpers: { sendJson, sendError, readJson, httpError, resolveInside, projectDir: () => ctx.dir, ffmpeg: () => findFfmpeg(ctx.dir, ctx.ffmpegArg) },
+    helpers: { sendJson, sendError, readJson, httpError, resolveInside, projectDir: () => ctx.store.root, store: ctx.store, ffmpeg: () => ffmpegFor(ctx) },
   });
   const server = http.createServer((req, res) => {
     handle(ctx, req, res).catch((err) => {
@@ -385,7 +350,7 @@ export async function startServer(opts) {
   const port = await listen(server, opts.port ?? DEFAULT_PORT);
   ctx.port = port;
   const url = `http://localhost:${port}`;
-  if (!opts.quiet) console.log(`MotionSnip Studio: ${url}  (project: ${dir})`);
+  if (!opts.quiet) console.log(`MotionSnip Studio: ${url}  (project: ${store.root})`);
   if (opts.open) openInBrowser(url);
   return {
     server,
@@ -490,15 +455,13 @@ function serveAddon(ctx, req, res, rel) {
 }
 
 /** /p/* -> a file in the project, else in its public/ folder. */
-function serveProject(ctx, req, res, rel) {
+async function serveProject(ctx, req, res, rel) {
   // Hidden files (.env, .git...) stay private; only our own .motionsnip folder is served.
   const parts = rel.split(/[\\/]/).filter(Boolean);
   if (parts.some((p) => p.startsWith('.') && p !== '.motionsnip')) return sendError(res, 403, 'Forbidden');
-  const file = resolveInside(ctx.dir, rel);
-  if (!file) return sendError(res, 403, 'Forbidden');
-  if (isFile(file)) return sendFile(req, res, file);
-  const pub = resolveInside(path.join(ctx.dir, 'public'), rel);
-  if (pub && isFile(pub)) return sendFile(req, res, pub);
+  if (!ctx.store.path(rel)) return sendError(res, 403, 'Forbidden');
+  const file = (await ctx.store.file(rel)) || (await ctx.store.file(`public/${rel}`));
+  if (file) return sendFile(req, res, file);
   return sendError(res, 404, 'Not found');
 }
 
@@ -543,7 +506,7 @@ async function api(ctx, req, res, route, url) {
     case 'POST frames-end':
       return apiFramesEnd(ctx, req, res, url);
     case 'GET ffmpeg': {
-      const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+      const ff = ffmpegFor(ctx);
       // edits: this ffmpeg can export a plain video's trim, cuts, colour and layers
       return sendJson(res, 200, { ok: !!ff, path: ff ? ff.path : null, edits: !!(await editEncoder(ctx, ff)) });
     }
@@ -563,7 +526,7 @@ async function api(ctx, req, res, route, url) {
 /** Load reel.json (or, with none, the plain video's made-up reel), or throw an http error with a short message. */
 async function loadReel(ctx) {
   const reel = await readReel(ctx);
-  const mine = readPlayerOutputs(ctx.dir);
+  const mine = await readPlayerOutputs(ctx.store);
   if (mine.length || reel.outputs) reel.outputs = mergeOutputs(reel.outputs, mine);
   return ctx.projectCode ? reel : withoutProjectCode(reel);
 }
@@ -588,18 +551,13 @@ export function withoutProjectCode(reel) {
 }
 
 async function readReel(ctx) {
-  const file = path.join(ctx.dir, 'reel.json');
-  if (!fs.existsSync(file)) {
+  const { store } = ctx;
+  const text = await store.readText('reel.json');
+  if (text == null) {
     // a video opened as a file plays plain until "Open in timeline" makes a timeline.json for it
-    if (isFile(path.join(ctx.dir, 'timeline.json')) && (!ctx.video || timelineFrom(ctx) === ctx.video)) return timelineReel(ctx);
+    if ((await store.file('timeline.json')) && (!ctx.video || (await timelineFrom(ctx)) === ctx.video)) return timelineReel(ctx);
     if (ctx.video) return plainReel(ctx);
-    return isFile(path.join(ctx.dir, 'scene.json')) ? sceneReel(ctx) : plainReel(ctx);
-  }
-  let text;
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch {
-    throw httpError(404, `reel.json not found in ${ctx.dir}`);
+    return (await store.file('scene.json')) ? sceneReel(ctx) : plainReel(ctx);
   }
   let reel;
   try {
@@ -608,30 +566,26 @@ async function readReel(ctx) {
     throw httpError(500, `reel.json is not valid JSON: ${err.message}`);
   }
   if (!reel || typeof reel !== 'object' || Array.isArray(reel)) throw httpError(500, 'reel.json must be a JSON object');
-  if (!reel.path) reel.path = ctx.dir; // so the prompt can always say where the project is
+  if (!reel.path) reel.path = store.root; // so the prompt can always say where the project is
   return reel;
 }
 
 async function apiReel(ctx, res) {
   const reel = await loadReel(ctx);
-  ensureTake(ctx, reel); // snapshot this version's video for compare (in the background)
+  ensureTake(ctx, reel); // (not awaited) snapshot this version's video for compare (in the background)
   return sendJson(res, 200, reel);
 }
 
-const stateFile = (ctx) => path.join(ctx.dir, '.motionsnip', 'state.json');
+const STATE_FILE = `${META}/state.json`;
 
-function apiGetState(ctx, res) {
-  let state = {};
-  try {
-    state = JSON.parse(fs.readFileSync(stateFile(ctx), 'utf8'));
-  } catch {}
-  return sendJson(res, 200, state);
+async function apiGetState(ctx, res) {
+  return sendJson(res, 200, (await ctx.store.readJson(STATE_FILE)) ?? {});
 }
 
 async function apiPostState(ctx, req, res) {
   const body = await readJson(req);
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw httpError(400, 'State must be a JSON object');
-  await writeAtomic(stateFile(ctx), JSON.stringify(body, null, 1));
+  await ctx.store.writeText(STATE_FILE, JSON.stringify(body, null, 1));
   return sendJson(res, 200, { ok: true });
 }
 
@@ -643,9 +597,9 @@ async function apiUpload(ctx, req, res, url) {
   const tooBig = `File is over ${Math.round(limit / 1024 / 1024)} MB`;
   if (Number(req.headers['content-length']) > limit) throw httpError(413, tooBig);
 
-  const assets = path.join(ctx.dir, 'assets');
-  await fsp.mkdir(assets, { recursive: true });
-  const tmp = path.join(assets, `.upload-${crypto.randomBytes(6).toString('hex')}.part`);
+  // streamed to a temp file next to where it goes, then moved in under a free name
+  const tmp = ctx.store.path(`assets/.upload-${crypto.randomBytes(6).toString('hex')}.part`);
+  await fsp.mkdir(path.dirname(tmp), { recursive: true });
   try {
     // Stream to a temp file so big files never sit in memory.
     const size = await new Promise((resolve, reject) => {
@@ -677,20 +631,9 @@ async function apiUpload(ctx, req, res, url) {
     const ok = type === 'video' ? got === (want === 'webm' ? 'webm' : 'iso') : got === want;
     if (!ok) throw httpError(415, `This doesn't look like a .${extOf(name)} file`);
 
-    // Never overwrite: link fails if the name is taken, so try name-2, name-3...
-    let final = null;
-    for (let n = 1; n < 10000 && !final; n++) {
-      const candidate = path.join(assets, numberedName(name, n));
-      try {
-        await fsp.link(tmp, candidate);
-        final = candidate;
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
-      }
-    }
-    if (!final) throw httpError(500, 'No free file name');
-    const base = path.basename(final);
-    return sendJson(res, 200, { id: `assets/${base}`, name: base, type });
+    // never overwrites: a taken name becomes name-2, name-3...
+    const id = await ctx.store.addFile('assets', name, tmp);
+    return sendJson(res, 200, { id, name: id.slice('assets/'.length), type });
   } finally {
     await fsp.rm(tmp, { force: true });
   }
@@ -701,22 +644,23 @@ async function apiFeedback(ctx, req, res) {
   const version = Number(body?.version);
   if (!Number.isInteger(version) || version < 0) throw httpError(400, 'version must be a whole number');
   if (typeof body.markdown !== 'string' || !body.markdown.trim()) throw httpError(400, 'markdown is required');
-  const file = path.join(ctx.dir, '.motionsnip', `feedback-v${version}.md`);
-  await writeAtomic(file, body.markdown.endsWith('\n') ? body.markdown : body.markdown + '\n');
-  return sendJson(res, 200, { path: file });
+  const rel = `${META}/feedback-v${version}.md`;
+  await ctx.store.writeText(rel, body.markdown.endsWith('\n') ? body.markdown : body.markdown + '\n');
+  return sendJson(res, 200, { path: ctx.store.path(rel) });
 }
 
 async function apiReveal(ctx, req, res) {
   const body = await readJson(req);
-  const file = typeof body?.path === 'string' ? resolveInside(ctx.dir, body.path) : null;
+  const file = typeof body?.path === 'string' ? ctx.store.path(body.path) : null;
   if (!file) throw httpError(403, 'Path must be inside the project');
-  if (!fs.existsSync(file)) throw httpError(404, 'Not found');
+  const st = await ctx.store.stat(body.path);
+  if (!st) throw httpError(404, 'Not found');
   const [cmd, args] =
     process.platform === 'darwin'
       ? ['open', ['-R', file]]
       : process.platform === 'win32'
         ? ['explorer', [`/select,${file}`]]
-        : ['xdg-open', [fs.statSync(file).isDirectory() ? file : path.dirname(file)]];
+        : ['xdg-open', [st.dir ? file : path.dirname(file)]];
   try {
     const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
     child.on('error', () => {});
@@ -727,60 +671,48 @@ async function apiReveal(ctx, req, res) {
 
 // --- Takes: copies of recent versions' videos, for compare ----------------
 
-const takesDir = (ctx) => path.join(ctx.dir, '.motionsnip', 'takes');
+const TAKES = `${META}/takes`;
 
-function listTakes(ctx) {
-  let names = [];
-  try {
-    names = fs.readdirSync(takesDir(ctx));
-  } catch {}
-  return names
-    .map((n) => {
-      const m = /^v(\d+)\.([A-Za-z0-9]+)$/.exec(n);
-      return m ? { version: Number(m[1]), file: n } : null;
+async function listTakes(ctx) {
+  return (await ctx.store.list(TAKES))
+    .map((e) => {
+      const m = /^v(\d+)\.([A-Za-z0-9]+)$/.exec(e.name);
+      return m && e.file ? { version: Number(m[1]), file: e.name, mtimeMs: e.mtimeMs } : null;
     })
     .filter(Boolean)
     .sort((a, b) => b.version - a.version);
 }
 
 /** Copy the current version's video into .motionsnip/takes/v<N>.<ext>, keep the newest 6. */
-function ensureTake(ctx, reel) {
+async function ensureTake(ctx, reel) {
+  const { store } = ctx;
   const version = Number(reel.version);
-  if (!Number.isInteger(version) || version < 0 || typeof reel.src !== 'string') return Promise.resolve();
-  const src = resolveInside(ctx.dir, reel.src);
-  if (!src || !isFile(src)) return Promise.resolve();
-  const ext = extOf(src) || 'mp4';
-  const dest = path.join(takesDir(ctx), `v${version}.${ext}`);
+  if (!Number.isInteger(version) || version < 0 || typeof reel.src !== 'string') return;
+  const src = await store.stat(reel.src);
+  if (!src?.file) return;
+  const name = `v${version}.${extOf(reel.src) || 'mp4'}`;
+  const dest = `${TAKES}/${name}`;
   // Copy when missing, or when the render changed after we copied it (Claude bumped the version mid-render).
-  try {
-    if (fs.statSync(dest).mtimeMs >= fs.statSync(src).mtimeMs) return Promise.resolve();
-  } catch {}
-  if (ctx.takesBusy.has(dest)) return Promise.resolve();
+  if (((await store.stat(dest))?.mtimeMs ?? -1) >= src.mtimeMs) return;
+  if (ctx.takesBusy.has(dest)) return;
   ctx.takesBusy.add(dest);
-  return (async () => {
-    try {
-      await fsp.mkdir(takesDir(ctx), { recursive: true });
-      const tmp = `${dest}.${crypto.randomBytes(4).toString('hex')}.part`;
-      let copied = false;
-      if (process.platform === 'darwin') copied = (await run('cp', ['-c', src, tmp])).code === 0; // APFS clone
-      if (!copied) await fsp.copyFile(src, tmp, fs.constants.COPYFILE_FICLONE);
-      await fsp.rename(tmp, dest);
-      // Other files for this version (different extension) are stale now.
-      for (const t of listTakes(ctx)) if (t.version === version && t.file !== path.basename(dest)) await fsp.rm(path.join(takesDir(ctx), t.file), { force: true });
-      for (const t of listTakes(ctx).slice(KEEP_TAKES)) await fsp.rm(path.join(takesDir(ctx), t.file), { force: true });
-    } catch (err) {
-      console.error('Could not save take:', err.message);
-    } finally {
-      ctx.takesBusy.delete(dest);
-    }
-  })();
+  try {
+    await store.copy(reel.src, dest);
+    // Other files for this version (different extension) are stale now.
+    for (const t of await listTakes(ctx)) if (t.version === version && t.file !== name) await store.remove(`${TAKES}/${t.file}`);
+    for (const t of (await listTakes(ctx)).slice(KEEP_TAKES)) await store.remove(`${TAKES}/${t.file}`);
+  } catch (err) {
+    console.error('Could not save take:', err.message);
+  } finally {
+    ctx.takesBusy.delete(dest);
+  }
 }
 
 async function apiTakes(ctx, res) {
   try {
     await ensureTake(ctx, await loadReel(ctx));
   } catch {}
-  const takes = listTakes(ctx).map((t) => ({
+  const takes = (await listTakes(ctx)).map((t) => ({
     version: t.version,
     src: `.motionsnip/takes/${t.file}`,
     url: `/p/.motionsnip/takes/${t.file}`,
@@ -804,14 +736,11 @@ async function formatsFor(ctx, ff) {
 }
 
 async function apiFormats(ctx, res) {
-  const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+  const ff = ffmpegFor(ctx);
   const have = await formatsFor(ctx, ff);
   const formats = Object.entries(FORMATS).map(([id, f]) => ({ id, label: f.label, ext: f.ext, ok: !!have[id], encoder: have[id] || null }));
   return sendJson(res, 200, { ffmpeg: !!ff, formats });
 }
-
-/** Where a scene's last export is remembered (scene.json stays Claude's file). */
-const renderFile = (ctx) => path.join(ctx.dir, '.motionsnip', 'render.json');
 
 /** Whether a media file has a sound track (cached per file version). */
 async function hasSound(ctx, ff, file) {
@@ -835,7 +764,7 @@ async function apiFramesStart(ctx, req, res) {
   }
   if (ctx.job.state === 'running') throw httpError(409, 'An export is already running');
   const body = (await readJson(req)) || {};
-  const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+  const ff = ffmpegFor(ctx);
   if (!ff) throw httpError(400, 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
   const format = FORMATS[body.format] ? body.format : 'mp4';
   const encoder = (await formatsFor(ctx, ff))[format];
@@ -848,17 +777,15 @@ async function apiFramesStart(ctx, req, res) {
   if (!(frames > 0) || frames > MAX_FRAMES) throw httpError(400, 'Bad frame count');
   const audio = [];
   for (const c of (Array.isArray(body.audio) ? body.audio : []).slice(0, 32)) {
-    const file = typeof c?.src === 'string' ? resolveInside(ctx.dir, c.src) : null;
-    if (!file || !isFile(file)) throw httpError(400, `Audio not found in the project: ${c?.src}`);
+    const file = typeof c?.src === 'string' ? await ctx.store.file(c.src) : null;
+    if (!file) throw httpError(400, `Audio not found in the project: ${c?.src}`);
     if (!(await hasSound(ctx, ff, file))) continue; // a video clip with no sound track adds nothing to the mix
     audio.push({ file, at: num(c.at, 0), in: num(c.in, 0), out: num(c.out, null), gain: num(c.gain, 1), fadeIn: num(c.fadeIn, 0), fadeOut: num(c.fadeOut, 0) });
   }
   const reel = await loadReel(ctx);
-  const exportsDir = path.join(ctx.dir, 'exports');
-  fs.mkdirSync(exportsDir, { recursive: true });
   const tag = typeof body.tag === 'string' && /^[\w-]{1,24}$/.test(body.tag) ? `-${body.tag}` : '';
-  const out = freePath(exportsDir, `${slug(reel.id)}${tag}-${stamp()}.${FORMATS[format].ext}`);
-  const rel = path.relative(ctx.dir, out).split(path.sep).join('/');
+  const rel = await ctx.store.freeName('exports', `${slug(reel.id)}${tag}-${stamp()}.${FORMATS[format].ext}`);
+  const out = ctx.store.path(rel);
   const raw = body.pix === 'rgba';
   // with sound, the frames become a picture-only file first and the sound is added in a second pass (see buildMuxArgs)
   const withSound = !!buildMuxArgs({ video: out, out, format, duration: frames / fps, audio });
@@ -867,11 +794,12 @@ async function apiFramesStart(ctx, req, res) {
   let comp = null;
   if (body.compose) {
     if (!raw) throw httpError(400, 'A composed export needs raw frames');
+    // the files its video clips use (asked up front: normComposeSpec is synchronous)
+    const files = new Map();
+    for (const L of Array.isArray(body.compose?.layers) ? body.compose.layers.slice(0, 64) : [])
+      if (typeof L?.src === 'string' && !files.has(L.src)) files.set(L.src, await ctx.store.file(L.src));
     try {
-      comp = normComposeSpec(body.compose, (src) => {
-        const f = typeof src === 'string' ? resolveInside(ctx.dir, src) : null;
-        return f && isFile(f) ? f : null;
-      });
+      comp = normComposeSpec(body.compose, (src) => files.get(src) || null);
     } catch (e) {
       throw httpError(400, e.message);
     }
@@ -982,7 +910,7 @@ async function apiFramesEnd(ctx, req, res, url) {
   await j.done;
   if (!j.failed && j.picture !== j.out) {
     setJob(ctx, { line: 'Adding sound…', pct: 99 });
-    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    const ff = ffmpegFor(ctx);
     const r = await run(ff.path, buildMuxArgs({ video: j.picture, out: j.out, format: j.format, duration: j.duration, audio: j.audio }), { env: ffmpegEnv(ff) });
     if (r.code !== 0) j.failed = lastLine(r.stderr) || `ffmpeg exited with code ${r.code}`;
   }
@@ -995,26 +923,25 @@ async function apiFramesEnd(ctx, req, res, url) {
   } else {
     if (j.setSrc) {
       try {
-        fs.mkdirSync(path.dirname(renderFile(ctx)), { recursive: true });
-        fs.writeFileSync(renderFile(ctx), JSON.stringify({ version: j.version, src: j.rel }));
+        await ctx.store.writeText(RENDER_FILE, JSON.stringify({ version: j.version, src: j.rel }));
       } catch {
         /* the export still worked */
       }
     }
-    const side = j.captions ? await writeCaptionFiles(ctx, j.out).catch(() => []) : [];
+    const side = j.captions ? await writeCaptionFiles(ctx, j.rel).catch(() => []) : [];
     setJob(ctx, { state: 'done', pct: 100, line: `Saved ${j.rel}${side.length ? ` and its captions (${side.join(', ')})` : ''}` });
   }
   return sendJson(res, 200, ctx.job);
 }
 
-/** A timeline's captions next to an export: name.srt and name.vtt. Returns the extensions written. */
-async function writeCaptionFiles(ctx, out) {
-  const { raw } = readProjectFile(ctx, 'timeline.json');
+/** A timeline's captions next to an export (rel): name.srt and name.vtt. Returns the extensions written. */
+async function writeCaptionFiles(ctx, rel) {
+  const { raw } = await readProjectFile(ctx, 'timeline.json');
   const cues = captionCues(normTimeline(raw, { scenes: await timelineScenes(ctx, raw) }));
   if (!cues.length) return [];
-  const base = out.replace(/\.[^./\\]+$/, '');
-  fs.writeFileSync(base + '.srt', toSrt(cues));
-  fs.writeFileSync(base + '.vtt', toVtt(cues));
+  const base = rel.replace(/\.[^./]+$/, '');
+  await ctx.store.writeText(base + '.srt', toSrt(cues));
+  await ctx.store.writeText(base + '.vtt', toVtt(cues));
   return ['.srt', '.vtt'];
 }
 
@@ -1034,8 +961,8 @@ async function apiExport(ctx, req, res) {
   // Music: a project path, or none.
   let music = null;
   if (body.music) {
-    music = typeof body.music === 'string' ? resolveInside(ctx.dir, body.music) : null;
-    if (!music || !isFile(music)) throw httpError(400, 'Music file not found in the project');
+    music = typeof body.music === 'string' ? await ctx.store.file(body.music) : null;
+    if (!music) throw httpError(400, 'Music file not found in the project');
   }
   const levels = {
     music,
@@ -1045,10 +972,8 @@ async function apiExport(ctx, req, res) {
     musicFade: Math.max(0, num(body.musicFade, 0)),
   };
 
-  const exportsDir = path.join(ctx.dir, 'exports');
-  fs.mkdirSync(exportsDir, { recursive: true });
-  const out = freePath(exportsDir, `${slug(reel.id)}-${stamp()}.mp4`);
-  const rel = path.relative(ctx.dir, out).split(path.sep).join('/');
+  const rel = await ctx.store.freeName('exports', `${slug(reel.id)}-${stamp()}.mp4`);
+  const out = ctx.store.path(rel);
   ctx.job = { state: 'running', pct: 0, line: 'Starting…', out, rel, mode };
 
   if (mode === 'render') {
@@ -1058,16 +983,16 @@ async function apiExport(ctx, req, res) {
     }
     runRender(ctx, reel, body.props, levels, out).catch((err) => setJob(ctx, { state: 'error', line: err.message }));
   } else if (mode === 'edit') {
-    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    const ff = ffmpegFor(ctx);
     const encoder = await editEncoder(ctx, ff);
-    const video = resolveInside(ctx.dir, String(reel.src || ''));
+    const video = await ctx.store.file(String(reel.src || ''));
     const fail = (line) => {
       setJob(ctx, { state: 'error', line, out: null, rel: null });
       return sendJson(res, 200, ctx.job);
     };
     if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
     if (!encoder) return fail("This ffmpeg can't apply edits (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
-    if (!video || !isFile(video)) return fail(`Video not found: ${reel.src}`);
+    if (!video) return fail(`Video not found: ${reel.src}`);
     runEdit(ctx, ff, encoder, video, reel, body.edit, levels, out)
       .then(() => setJob(ctx, { state: 'done', pct: 100, line: `Saved ${rel}` }))
       .catch((err) => {
@@ -1075,13 +1000,13 @@ async function apiExport(ctx, req, res) {
         setJob(ctx, { state: 'error', line: err.message, out: null, rel: null });
       });
   } else {
-    const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+    const ff = ffmpegFor(ctx);
     if (!ff) {
       setJob(ctx, { state: 'error', line: 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.', out: null, rel: null });
       return sendJson(res, 200, ctx.job);
     }
-    const video = resolveInside(ctx.dir, String(reel.src || ''));
-    if (!video || !isFile(video)) {
+    const video = await ctx.store.file(String(reel.src || ''));
+    if (!video) {
       setJob(ctx, { state: 'error', line: `Video not found: ${reel.src}`, out: null, rel: null });
       return sendJson(res, 200, ctx.job);
     }
@@ -1189,11 +1114,11 @@ async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
 // --- Cutdowns -----------------------------------------------------------------
 
 /** Music and levels from a request body (the player's current audio). */
-function levelsFrom(ctx, body) {
+async function levelsFrom(ctx, body) {
   let music = null;
   if (body.music) {
-    music = typeof body.music === 'string' ? resolveInside(ctx.dir, body.music) : null;
-    if (!music || !isFile(music)) throw httpError(400, 'Music file not found in the project');
+    music = typeof body.music === 'string' ? await ctx.store.file(body.music) : null;
+    if (!music) throw httpError(400, 'Music file not found in the project');
   }
   return {
     music,
@@ -1210,21 +1135,21 @@ async function apiCutdown(ctx, req, res) {
   const body = (await readJson(req)) || {};
   if (typeof body.id !== 'string' || !body.id) throw httpError(400, 'Which cutdown? (id)');
   const reel = await readReel(ctx);
-  const mine = readPlayerOutputs(ctx.dir);
+  const mine = await readPlayerOutputs(ctx.store);
   if ((Array.isArray(reel.outputs) ? reel.outputs : []).some((o) => o && String(o.id) === body.id)) {
     throw httpError(400, 'Claude made this version; ask Claude to change it');
   }
-  const levels = levelsFrom(ctx, body);
+  const levels = await levelsFrom(ctx, body);
   const fail = (line) => {
     ctx.cut = { state: 'error', pct: 0, line, id: body.id, label: null };
     return sendJson(res, 200, ctx.cut);
   };
-  const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+  const ff = ffmpegFor(ctx);
   if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
   const encoder = await cutEncoder(ctx, ff);
   if (!encoder) return fail("This ffmpeg can't make cutdowns (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
-  const video = resolveInside(ctx.dir, String(reel.src || ''));
-  if (!video || !isFile(video)) return fail(`Video not found: ${reel.src}`);
+  const video = await ctx.store.file(String(reel.src || ''));
+  if (!video) return fail(`Video not found: ${reel.src}`);
   const info = await probe(ff, video);
   if (!(info.duration > 0) || !info.w || !info.h) return fail("Couldn't read the video's length or size");
 
@@ -1262,10 +1187,9 @@ async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
   const D = info.duration;
   const keep = entry.kind === 'bumper' ? entry.ranges : [[0, D]];
   const reframe = entry.kind === 'reframe' ? reframeSpec(info.w, info.h, entry) : null;
-  const dir = path.join(ctx.dir, 'outputs');
-  fs.mkdirSync(dir, { recursive: true });
-  const final = path.join(dir, `${entry.id}.mp4`);
-  const tmp = path.join(dir, `.${entry.id}.${crypto.randomBytes(3).toString('hex')}.mp4`);
+  const final = ctx.store.path(`outputs/${entry.id}.mp4`);
+  const tmp = ctx.store.path(`outputs/.${entry.id}.${crypto.randomBytes(3).toString('hex')}.mp4`);
+  fs.mkdirSync(path.dirname(final), { recursive: true });
   const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
   const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W: info.w, H: info.h, fps: info.fps || reel.fps, D, keep, reframe, encoder, out: tmp, ...levels });
   try {
@@ -1291,25 +1215,24 @@ async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
     throw err;
   }
   // list it (re-read: the list may have changed while ffmpeg ran)
-  const list = readPlayerOutputs(ctx.dir);
+  const list = await readPlayerOutputs(ctx.store);
   const i = list.findIndex((o) => o.id === entry.id);
   const version = i >= 0 ? (Number(list[i].version) || 1) + 1 : 1;
   const done = { ...entry, version, from: Number(reel.version) || 1, made: new Date().toISOString() };
   if (i >= 0) list[i] = done;
   else list.push(done);
-  writePlayerOutputs(ctx.dir, list);
+  await writePlayerOutputs(ctx.store, list);
 }
 
 /** Remove a cutdown made in the player, and its video. */
 async function apiCutdownRemove(ctx, req, res) {
   const body = (await readJson(req)) || {};
   if (ctx.cut.state === 'running' && ctx.cut.id === body.id) throw httpError(409, 'That cutdown is being made');
-  const list = readPlayerOutputs(ctx.dir);
+  const list = await readPlayerOutputs(ctx.store);
   const o = list.find((x) => x.id === body.id);
   if (!o) throw httpError(404, 'No such cutdown');
-  const file = resolveInside(ctx.dir, `outputs/${o.id}.mp4`);
-  if (file) fs.rmSync(file, { force: true });
-  writePlayerOutputs(ctx.dir, list.filter((x) => x !== o));
+  await ctx.store.remove(`outputs/${o.id}.mp4`);
+  await writePlayerOutputs(ctx.store, list.filter((x) => x !== o));
   return sendJson(res, 200, { ok: true });
 }
 
@@ -1325,12 +1248,13 @@ async function runRender(ctx, reel, reqProps, levels, out) {
     const propsFile = path.join(tmp, 'props.json');
     fs.writeFileSync(propsFile, JSON.stringify(props));
     const raw = path.join(tmp, 'raw.mp4');
-    const cwd = reel.export.cwd ? path.resolve(ctx.dir, String(reel.export.cwd)) : ctx.dir;
+    // export.cmd runs on this computer, in the project folder (or export.cwd, which may be outside it)
+    const cwd = reel.export.cwd ? path.resolve(ctx.store.root, String(reel.export.cwd)) : ctx.store.root;
     if (!fs.existsSync(cwd)) throw new Error(`export.cwd not found: ${cwd}`);
     setJob(ctx, { line: 'Rendering…' });
 
     await new Promise((resolve, reject) => {
-      const env = { ...process.env, PROPS: propsFile, OUT: out, RAW: raw, PROJECT: ctx.dir };
+      const env = { ...process.env, PROPS: propsFile, OUT: out, RAW: raw, PROJECT: ctx.store.root };
       const child = spawn('sh', ['-c', reel.export.cmd], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
       ctx.child = child;
       let tail = '';
@@ -1352,15 +1276,14 @@ async function runRender(ctx, reel, reqProps, levels, out) {
 
     if (!isFile(out)) {
       if (!isFile(raw)) throw new Error('The export command finished but wrote neither $OUT nor $RAW');
-      const ff = findFfmpeg(ctx.dir, ctx.ffmpegArg);
+      const ff = ffmpegFor(ctx);
       if (levels.music && ff) {
         await runMix(ctx, ff, raw, levels, out, reel.duration);
       } else {
         await fsp.copyFile(raw, out);
       }
     }
-    const rel = path.relative(ctx.dir, out).split(path.sep).join('/');
-    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${rel}` });
+    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${ctx.store.rel(out)}` });
   } catch (err) {
     setJob(ctx, { state: 'error', line: err.message, out: null, rel: null });
   } finally {
@@ -1649,23 +1572,60 @@ async function selftest() {
     assert.throws(() => buildMixArgs({ ...common, duration: 0 }));
 
     // Plain videos: which file, and its version
+    // ProjectStore (lib/store.mjs): the local folder store the routes go through
+    {
+      const sd = mkTmp();
+      const st = localStore(sd);
+      assert.equal(await st.readText('nope.json'), null, 'a missing file reads as null');
+      assert.equal(await st.readJson('nope.json'), null);
+      assert.equal(st.path('../x'), null, 'paths stay inside the project');
+      await assert.rejects(st.writeText('../x.txt', 'no'), /inside the project/);
+      await st.writeText('a/b.json', '{"x":1}');
+      assert.deepEqual(await st.readJson('a/b.json'), { x: 1 });
+      fs.writeFileSync(path.join(sd, 'bad.json'), '{');
+      assert.equal(await st.readJson('bad.json'), null, 'invalid JSON reads as null');
+      await assert.rejects(st.writeText('a/b.json', 'again', { create: true }), (e) => e.code === 'EEXIST');
+      assert.equal(fs.readdirSync(path.join(sd, 'a')).length, 1, 'no temp files left behind');
+      assert.equal(await st.file('a'), null, 'a folder is not a file');
+      assert.equal(await st.file('a/b.json'), path.join(sd, 'a', 'b.json'));
+      assert.deepEqual((await st.stat('a')).dir, true);
+      assert.deepEqual((await st.list('a')).map((e) => e.name), ['b.json']);
+      assert.deepEqual(await st.list('missing'), []);
+      assert.equal(st.rel(path.join(sd, 'a', 'b.json')), 'a/b.json');
+      assert.equal(await st.freeName('out', 'v.mp4'), 'out/v.mp4');
+      fs.writeFileSync(path.join(sd, 'out', 'v.mp4'), 'x');
+      assert.equal(await st.freeName('out', 'v.mp4'), 'out/v-2.mp4', 'a taken name gets a number');
+      const tmpUp = path.join(sd, 'up.part');
+      fs.writeFileSync(tmpUp, 'new');
+      assert.equal(await st.addFile('out', 'v.mp4', tmpUp), 'out/v-2.mp4', 'addFile never overwrites');
+      assert.equal(fs.readFileSync(path.join(sd, 'out', 'v.mp4'), 'utf8'), 'x');
+      assert.ok(!fs.existsSync(tmpUp), 'the temp file is moved in');
+      await st.copy('out/v.mp4', 'c/copy.mp4');
+      assert.equal(fs.readFileSync(path.join(sd, 'c', 'copy.mp4'), 'utf8'), 'x');
+      await st.remove('c', { recursive: true });
+      await st.remove('c/none.txt');
+      assert.ok(!fs.existsSync(path.join(sd, 'c')));
+      await st.remove('');
+      assert.ok(fs.existsSync(sd), 'the project folder itself is never removed');
+    }
     const pv = mkTmp();
-    assert.equal(pickVideo(pv), null);
+    const pvs = localStore(pv);
+    assert.equal(await pickVideo(pvs), null);
     fs.writeFileSync(path.join(pv, 'old.mp4'), 'a');
     fs.writeFileSync(path.join(pv, '.hidden.mp4'), 'a');
     fs.writeFileSync(path.join(pv, 'notes.txt'), 'a');
     fs.writeFileSync(path.join(pv, 'new.MOV'), 'a');
     fs.utimesSync(path.join(pv, 'old.mp4'), new Date(2020, 0, 1), new Date(2020, 0, 1));
-    assert.equal(pickVideo(pv), 'new.MOV', 'the newest playable file, no dotfiles');
+    assert.equal(await pickVideo(pvs), 'new.MOV', 'the newest playable file, no dotfiles');
     const T = 1_800_000_000_000;
     const st = (size, ago) => ({ size, mtimeMs: T - ago });
-    assert.equal(videoVersion(pv, 'clip.mp4', st(10, 60000), T), 1);
-    assert.equal(videoVersion(pv, 'clip.mp4', st(10, 60000), T), 1, 'same file, same version');
-    assert.equal(videoVersion(pv, 'clip.mp4', st(12, 50000), T), 2, 'the file changed');
-    assert.equal(videoVersion(pv, 'clip.mp4', st(14, 500), T), 2, 'still being written: wait');
-    assert.equal(videoVersion(pv, 'clip.mp4', st(14, 40000), T), 3);
+    assert.equal(await videoVersion(pvs, 'clip.mp4', st(10, 60000), T), 1);
+    assert.equal(await videoVersion(pvs, 'clip.mp4', st(10, 60000), T), 1, 'same file, same version');
+    assert.equal(await videoVersion(pvs, 'clip.mp4', st(12, 50000), T), 2, 'the file changed');
+    assert.equal(await videoVersion(pvs, 'clip.mp4', st(14, 500), T), 2, 'still being written: wait');
+    assert.equal(await videoVersion(pvs, 'clip.mp4', st(14, 40000), T), 3);
     fs.mkdirSync(path.join(pv, '.motionsnip', 'takes'), { recursive: true });
-    assert.equal(videoVersion(pv, 'other.mp4', st(10, 60000), T), 1, 'another video starts again');
+    assert.equal(await videoVersion(pvs, 'other.mp4', st(10, 60000), T), 1, 'another video starts again');
     assert.ok(!fs.existsSync(path.join(pv, '.motionsnip', 'takes')), "and the old video's takes go");
 
     // End to end against a temp project
@@ -2634,7 +2594,7 @@ async function main() {
   if (!video && !isFile(path.join(dir, 'reel.json')) && isFile(path.join(dir, 'timeline.json'))) console.log(`Timeline project: composing ${path.join(dir, 'timeline.json')} live.`);
   else if (!video && !isFile(path.join(dir, 'reel.json')) && isFile(path.join(dir, 'scene.json'))) console.log(`Scene project: drawing ${path.join(dir, 'scene.json')} live.`);
   else if (!video && !isFile(path.join(dir, 'reel.json'))) {
-    const found = pickVideo(dir);
+    const found = await pickVideo(localStore(dir));
     if (found) console.log(`No reel.json in ${dir}: opening ${found} as a plain video.`);
     else console.warn(`Note: no reel.json or video in ${dir} yet. The player will wait for one.`);
   }
