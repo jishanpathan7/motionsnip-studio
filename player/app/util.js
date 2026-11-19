@@ -163,6 +163,34 @@ export async function api(path, opts = {}) {
   return data;
 }
 
+const etags = new Map(); // path → the ETag of the last answer
+
+/**
+ * GET a JSON API route that answers 304 when nothing changed (the server's sendJsonTagged): its data, or
+ * undefined when it is the same as the last time this path was asked. Errors as api().
+ */
+export async function apiIfChanged(path) {
+  const tag = etags.get(path);
+  const res = await fetch(path, { cache: 'no-store', headers: tag ? { 'If-None-Match': tag } : {} });
+  if (res.status === 304 && tag) return undefined;
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    etags.delete(path);
+    const msg = (data && (data.error || data.message)) || (typeof data === 'string' && data) || res.statusText;
+    throw Object.assign(new Error(String(msg).slice(0, 200)), { status: res.status });
+  }
+  const next = res.headers.get('ETag');
+  if (next) etags.set(path, next);
+  else etags.delete(path);
+  return data;
+}
+
 /** URL of a project file served by the server. */
 export function projectUrl(p) {
   if (!p) return '';

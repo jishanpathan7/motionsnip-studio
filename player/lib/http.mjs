@@ -2,6 +2,7 @@
 // sending JSON, errors and files. Pure Node, no dependencies.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 export const JSON_LIMIT = 2 * 1024 * 1024; // 2 MB
 
@@ -127,10 +128,28 @@ export const BASE_HEADERS = {
   'Referrer-Policy': 'no-referrer',
 };
 
-export function sendJson(res, status, body) {
+export function sendJson(res, status, body, headers = {}) {
   const data = Buffer.from(JSON.stringify(body));
-  res.writeHead(status, { ...BASE_HEADERS, 'Content-Type': MIME.json, 'Content-Length': data.length });
+  res.writeHead(status, { ...BASE_HEADERS, 'Content-Type': MIME.json, 'Content-Length': data.length, ...headers });
   res.end(data);
+}
+
+/**
+ * JSON with an ETag (a hash of the body). A request whose If-None-Match names the same one gets 304 and no body,
+ * so a page that polls only parses something new.
+ */
+export function sendJsonTagged(req, res, body) {
+  const data = Buffer.from(JSON.stringify(body));
+  const etag = `"${crypto.createHash('sha1').update(data).digest('base64url').slice(0, 22)}"`;
+  const asked = String(req.headers['if-none-match'] || '')
+    .split(',')
+    .map((t) => t.trim().replace(/^W\//, ''));
+  if (asked.includes(etag)) {
+    res.writeHead(304, { ...BASE_HEADERS, ETag: etag });
+    return res.end();
+  }
+  res.writeHead(200, { ...BASE_HEADERS, 'Content-Type': MIME.json, 'Content-Length': data.length, ETag: etag });
+  res.end(req.method === 'HEAD' ? undefined : data);
 }
 
 export function sendError(res, status, message) {

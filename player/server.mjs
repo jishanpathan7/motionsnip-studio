@@ -30,7 +30,7 @@ import { applyOps } from './app/comp/ops.mjs';
 import { loadAddons, addonList, defaultAddonDirs } from './lib/addons.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, buildMuxArgs, countPngs } from './lib/frames.mjs';
 import { normComposeSpec, buildComposeArgs } from './lib/compose.mjs';
-import { JSON_LIMIT, extOf, mimeFor, parseRange, hostAllowed, originAllowed, readBody, readJson, httpError, sendJson, sendError, sendFile } from './lib/http.mjs';
+import { JSON_LIMIT, extOf, mimeFor, parseRange, hostAllowed, originAllowed, readBody, readJson, httpError, sendJson, sendJsonTagged, sendError, sendFile } from './lib/http.mjs';
 import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, cleanName, numberedName, sniffAudio, sniffImage, sniffVideo, resolveInside, parseReel, slug, stamp, isFile, isExecutable } from './lib/files.mjs';
 import { localStore, META } from './lib/store.mjs';
 import { createJobRunner, runTracked } from './lib/jobs.mjs';
@@ -471,7 +471,7 @@ async function api(ctx, req, res, route, url) {
   const key = `${m} ${route}`;
   switch (key) {
     case 'GET reel':
-      return apiReel(ctx, res);
+      return apiReel(ctx, req, res);
     case 'GET state':
       return apiGetState(ctx, res);
     case 'POST state':
@@ -571,10 +571,10 @@ async function readReel(ctx) {
   return reel;
 }
 
-async function apiReel(ctx, res) {
+async function apiReel(ctx, req, res) {
   const reel = await loadReel(ctx);
   ensureTake(ctx, reel); // (not awaited) snapshot this version's video for compare (in the background)
-  return sendJson(res, 200, reel);
+  return sendJsonTagged(req, res, reel); // the player polls this every 2 s: 304 when nothing changed
 }
 
 const STATE_FILE = `${META}/state.json`;
@@ -1608,6 +1608,21 @@ async function selftest() {
       assert.equal(r.status, 200);
       assert.equal(r.json.id, 'test');
       assert.equal(r.json.path, dir);
+      // polling: an ETag, and 304 with no body while nothing changed
+      const tag = r.headers.etag;
+      assert.match(tag, /^"[\w-]+"$/);
+      r = await req('GET', '/api/reel', { headers: { 'if-none-match': tag } });
+      assert.equal(r.status, 304, 'unchanged reel: 304');
+      assert.equal(r.buf.length, 0);
+      assert.equal(r.headers.etag, tag);
+      r = await req('GET', '/api/reel', { headers: { 'if-none-match': `"other", W/${tag}` } });
+      assert.equal(r.status, 304, 'a list of tags, and weak ones, match too');
+      fs.writeFileSync(path.join(dir, 'reel.json'), JSON.stringify({ id: 'test', title: 'Test 2', version: 1, src: 'video.mp4', duration: 1 }));
+      r = await req('GET', '/api/reel', { headers: { 'if-none-match': tag } });
+      assert.equal(r.status, 200, 'a changed reel comes back whole');
+      assert.equal(r.json.title, 'Test 2');
+      assert.notEqual(r.headers.etag, tag);
+      fs.writeFileSync(path.join(dir, 'reel.json'), JSON.stringify({ id: 'test', title: 'Test', version: 1, src: 'video.mp4', duration: 1 }));
 
       r = await req('GET', '/api/reel', { headers: { host: `evil.example:${port}` } });
       assert.equal(r.status, 403, 'bad host');

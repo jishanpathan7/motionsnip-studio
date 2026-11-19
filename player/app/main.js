@@ -45,7 +45,7 @@ import { initFavicon, setFavicon } from './favicon.js';
 import { initKeys, toggleSheet } from './keys.js';
 import { initVedit, hint as plainHint, addLogoFile } from './vedit.js';
 import { initOutputs, outputsSig } from './outputs.js';
-import { h, icon, api, fmtTime, toast, debounce, clamp, prefersReducedMotion } from './util.js';
+import { h, icon, api, apiIfChanged, fmtTime, toast, debounce, clamp, prefersReducedMotion } from './util.js';
 
 const ui = {};
 let readyUntilFocus = false;
@@ -408,7 +408,7 @@ const writeHash = debounce(() => {
 async function poll() {
   let raw;
   try {
-    raw = await api('/api/reel');
+    raw = await apiIfChanged('/api/reel'); // undefined: the same as last time
   } catch (e) {
     if (e.status) {
       // reel.json is broken right now (Claude may be mid-write); keep the current one
