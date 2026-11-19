@@ -33,6 +33,7 @@ import { normComposeSpec, buildComposeArgs } from './lib/compose.mjs';
 import { JSON_LIMIT, extOf, mimeFor, parseRange, hostAllowed, originAllowed, readBody, readJson, httpError, sendJson, sendError, sendFile } from './lib/http.mjs';
 import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, cleanName, numberedName, sniffAudio, sniffImage, sniffVideo, resolveInside, parseReel, slug, stamp, isFile, isExecutable } from './lib/files.mjs';
 import { localStore, META } from './lib/store.mjs';
+import { createJobRunner, runTracked } from './lib/jobs.mjs';
 import { EDIT_FILTERS, parseProbe, progressFromText, buildMixArgs, within, keepRanges, normLook, lookMatrix, lookFilter, buildEditArgs, pickEditEncoder, run, findFfmpeg, ffmpegEnv, probe, lastLine } from './lib/media.mjs';
 // moved to lib/ and still exported from here, for the selftest and anything that imported them
 export { EDIT_FILTERS, buildEditArgs, buildMixArgs, cleanName, extOf, findFfmpeg, hostAllowed, keepRanges, lookFilter, lookMatrix, mimeFor, normLook, numberedName, originAllowed, parseProbe, parseRange, parseReel, pickEditEncoder, progressFromText, resolveInside, slug, sniffAudio, sniffImage, sniffVideo, stamp };
@@ -318,10 +319,11 @@ export async function startServer(opts) {
     video: opts.video || null,
     probed: null, // the plain video's last ffmpeg probe
     editEnc: null, // { path, encoder } for edit exports
-    job: { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null },
-    child: null,
-    cut: { state: 'idle', pct: 0, line: '', id: null, label: null }, // the cutdown being made
-    cutChild: null,
+    // the long tasks (lib/jobs.mjs): an export (the video) and a cutdown being made
+    jobs: createJobRunner({
+      export: { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null },
+      cutdown: { state: 'idle', pct: 0, line: '', id: null, label: null },
+    }),
     takesBusy: new Set(),
     addons: new Map(),
     // false (--safe): code from the project folder never runs: no export.cmd, no live.js
@@ -359,8 +361,7 @@ export async function startServer(opts) {
     ctx,
     close: () =>
       new Promise((resolve) => {
-        if (ctx.child) ctx.child.kill();
-        if (ctx.cutChild) ctx.cutChild.kill();
+        ctx.jobs.stopAll();
         server.close(() => resolve());
         server.closeAllConnections?.();
       }),
@@ -480,7 +481,7 @@ async function api(ctx, req, res, route, url) {
     case 'POST feedback':
       return apiFeedback(ctx, req, res);
     case 'GET export':
-      return sendJson(res, 200, ctx.job);
+      return sendJson(res, 200, ctx.jobs.export.status);
     case 'POST export':
       return apiExport(ctx, req, res);
     case 'POST reveal':
@@ -488,7 +489,7 @@ async function api(ctx, req, res, route, url) {
     case 'GET takes':
       return apiTakes(ctx, res);
     case 'GET cutdown':
-      return sendJson(res, 200, ctx.cut);
+      return sendJson(res, 200, ctx.jobs.cutdown.status);
     case 'POST cutdown':
       return apiCutdown(ctx, req, res);
     case 'POST cutdown-remove':
@@ -760,9 +761,9 @@ async function apiFramesStart(ctx, req, res) {
     fs.rmSync(ctx.frames.out, { force: true });
     fs.rmSync(ctx.frames.picture, { force: true });
     ctx.frames = null;
-    setJob(ctx, { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null });
+    ctx.jobs.export.reset();
   }
-  if (ctx.job.state === 'running') throw httpError(409, 'An export is already running');
+  if (ctx.jobs.export.running) throw httpError(409, 'An export is already running');
   const body = (await readJson(req)) || {};
   const ff = ffmpegFor(ctx);
   if (!ff) throw httpError(400, 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
@@ -837,8 +838,8 @@ async function apiFramesStart(ctx, req, res) {
     });
   });
   ctx.frames = job;
-  ctx.child = child;
-  ctx.job = { state: 'running', pct: 0, line: `Drawing frames (0/${frames})…`, out, rel, mode: 'frames' };
+  ctx.jobs.export.attach(child);
+  ctx.jobs.export.begin({ line: `Drawing frames (0/${frames})…`, out, rel, mode: 'frames' });
   return sendJson(res, 200, { job: id, format, encoder, w, h, fps, frames, rel, composed: !!comp });
 }
 
@@ -886,7 +887,7 @@ async function apiFramesPush(ctx, req, res, url) {
       } else j.got += countPngs(fresh);
     }
   }
-  setJob(ctx, { pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
+  ctx.jobs.export.set({ pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
   if (j.failed) throw httpError(500, j.failed);
   return sendJson(res, 200, { got: j.got });
 }
@@ -901,25 +902,23 @@ async function apiFramesEnd(ctx, req, res, url) {
     fs.rmSync(j.out, { force: true });
     fs.rmSync(j.picture, { force: true });
     ctx.frames = null;
-    ctx.child = null;
-    setJob(ctx, { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null });
-    return sendJson(res, 200, ctx.job);
+    ctx.jobs.export.reset();
+    return sendJson(res, 200, ctx.jobs.export.status);
   }
-  setJob(ctx, { line: 'Encoding…', pct: 98 });
+  ctx.jobs.export.set({ line: 'Encoding…', pct: 98 });
   j.child.stdin.end();
   await j.done;
   if (!j.failed && j.picture !== j.out) {
-    setJob(ctx, { line: 'Adding sound…', pct: 99 });
+    ctx.jobs.export.set({ line: 'Adding sound…', pct: 99 });
     const ff = ffmpegFor(ctx);
     const r = await run(ff.path, buildMuxArgs({ video: j.picture, out: j.out, format: j.format, duration: j.duration, audio: j.audio }), { env: ffmpegEnv(ff) });
     if (r.code !== 0) j.failed = lastLine(r.stderr) || `ffmpeg exited with code ${r.code}`;
   }
   if (j.picture !== j.out) fs.rmSync(j.picture, { force: true });
   ctx.frames = null;
-  ctx.child = null;
   if (j.failed) {
     fs.rmSync(j.out, { force: true });
-    setJob(ctx, { state: 'error', line: j.failed, out: null, rel: null });
+    ctx.jobs.export.set({ state: 'error', line: j.failed, out: null, rel: null });
   } else {
     if (j.setSrc) {
       try {
@@ -929,9 +928,9 @@ async function apiFramesEnd(ctx, req, res, url) {
       }
     }
     const side = j.captions ? await writeCaptionFiles(ctx, j.rel).catch(() => []) : [];
-    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${j.rel}${side.length ? ` and its captions (${side.join(', ')})` : ''}` });
+    ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${j.rel}${side.length ? ` and its captions (${side.join(', ')})` : ''}` });
   }
-  return sendJson(res, 200, ctx.job);
+  return sendJson(res, 200, ctx.jobs.export.status);
 }
 
 /** A timeline's captions next to an export (rel): name.srt and name.vtt. Returns the extensions written. */
@@ -947,12 +946,8 @@ async function writeCaptionFiles(ctx, rel) {
 
 // --- Export ------------------------------------------------------------------
 
-function setJob(ctx, patch) {
-  Object.assign(ctx.job, patch);
-}
-
 async function apiExport(ctx, req, res) {
-  if (ctx.job.state === 'running') throw httpError(409, 'An export is already running');
+  if (ctx.jobs.export.running) throw httpError(409, 'An export is already running');
   const body = (await readJson(req, EXPORT_LIMIT)) || {};
   const mode = ['render', 'edit'].includes(body.mode) ? body.mode : 'mix';
   if (mode === 'render' && !ctx.projectCode) throw httpError(403, "This server runs in safe mode (--safe): the project's export command doesn't run");
@@ -974,81 +969,65 @@ async function apiExport(ctx, req, res) {
 
   const rel = await ctx.store.freeName('exports', `${slug(reel.id)}-${stamp()}.mp4`);
   const out = ctx.store.path(rel);
-  ctx.job = { state: 'running', pct: 0, line: 'Starting…', out, rel, mode };
+  ctx.jobs.export.begin({ line: 'Starting…', out, rel, mode });
 
   if (mode === 'render') {
     if (!reel.export || typeof reel.export.cmd !== 'string' || !reel.export.cmd.trim()) {
-      ctx.job = { state: 'idle', pct: 0, line: '', out: null, rel: null, mode: null };
+      ctx.jobs.export.reset();
       throw httpError(400, 'reel.json has no export.cmd');
     }
-    runRender(ctx, reel, body.props, levels, out).catch((err) => setJob(ctx, { state: 'error', line: err.message }));
+    runRender(ctx, reel, body.props, levels, out).catch((err) => ctx.jobs.export.set({ state: 'error', line: err.message }));
   } else if (mode === 'edit') {
     const ff = ffmpegFor(ctx);
     const encoder = await editEncoder(ctx, ff);
     const video = await ctx.store.file(String(reel.src || ''));
     const fail = (line) => {
-      setJob(ctx, { state: 'error', line, out: null, rel: null });
-      return sendJson(res, 200, ctx.job);
+      ctx.jobs.export.set({ state: 'error', line, out: null, rel: null });
+      return sendJson(res, 200, ctx.jobs.export.status);
     };
     if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
     if (!encoder) return fail("This ffmpeg can't apply edits (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
     if (!video) return fail(`Video not found: ${reel.src}`);
     runEdit(ctx, ff, encoder, video, reel, body.edit, levels, out)
-      .then(() => setJob(ctx, { state: 'done', pct: 100, line: `Saved ${rel}` }))
+      .then(() => ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${rel}` }))
       .catch((err) => {
         fs.rmSync(out, { force: true });
-        setJob(ctx, { state: 'error', line: err.message, out: null, rel: null });
+        ctx.jobs.export.set({ state: 'error', line: err.message, out: null, rel: null });
       });
   } else {
     const ff = ffmpegFor(ctx);
     if (!ff) {
-      setJob(ctx, { state: 'error', line: 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.', out: null, rel: null });
-      return sendJson(res, 200, ctx.job);
+      ctx.jobs.export.set({ state: 'error', line: 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.', out: null, rel: null });
+      return sendJson(res, 200, ctx.jobs.export.status);
     }
     const video = await ctx.store.file(String(reel.src || ''));
     if (!video) {
-      setJob(ctx, { state: 'error', line: `Video not found: ${reel.src}`, out: null, rel: null });
-      return sendJson(res, 200, ctx.job);
+      ctx.jobs.export.set({ state: 'error', line: `Video not found: ${reel.src}`, out: null, rel: null });
+      return sendJson(res, 200, ctx.jobs.export.status);
     }
     runMix(ctx, ff, video, levels, out, reel.duration)
-      .then(() => setJob(ctx, { state: 'done', pct: 100, line: `Saved ${rel}` }))
+      .then(() => ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${rel}` }))
       .catch((err) => {
         fs.rmSync(out, { force: true });
-        setJob(ctx, { state: 'error', line: err.message, out: null, rel: null });
+        ctx.jobs.export.set({ state: 'error', line: err.message, out: null, rel: null });
       });
   }
-  return sendJson(res, 200, ctx.job);
+  return sendJson(res, 200, ctx.jobs.export.status);
 }
 
-/** Copy the video and mix in the music with ffmpeg. Updates ctx.job.pct as it goes. */
+/** Copy the video and mix in the music with ffmpeg. Updates the export's pct as it goes. */
 async function runMix(ctx, ff, video, levels, out, reelDuration) {
   const info = await probe(ff, video);
   const duration = info.duration || num(reelDuration, 0);
   if (!(duration > 0)) throw new Error('Could not read the video duration');
   const args = buildMixArgs({ video, out, duration, hasVideoAudio: info.hasAudio, ...levels });
-  setJob(ctx, { line: 'Mixing audio…' });
-  await new Promise((resolve, reject) => {
-    const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['ignore', 'pipe', 'pipe'] });
-    ctx.child = child;
-    let errText = '';
-    child.stdout.on('data', (d) => {
-      // -progress pipe:1 prints "out_time_us=12345" lines.
-      const m = [...String(d).matchAll(/out_time_us=(\d+)/g)].pop();
-      if (m) setJob(ctx, { pct: clamp((Number(m[1]) / 1e6 / duration) * 100, 0, 99) });
-    });
-    child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
-    child.on('error', reject);
-    child.on('close', (code) => {
-      ctx.child = null;
-      if (code === 0) resolve();
-      else reject(new Error(lastLine(errText) || `ffmpeg exited with code ${code}`));
-    });
-  });
+  ctx.jobs.export.set({ line: 'Mixing audio…' });
+  await runTracked(ctx.jobs.export, ff.path, args, { env: ffmpegEnv(ff), seconds: duration });
 }
 
 /**
  * Export an edited plain video: trim, cuts, colour, blur boxes, and text/logo layers the player drew as
- * full-frame PNGs (data URLs in edit.layers[].png). Updates ctx.job.pct over the edited length.
+ * full-frame PNGs (data URLs in edit.layers[].png). Updates the export's pct over the edited length.
  */
 async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
   const info = await probe(ff, video);
@@ -1089,23 +1068,8 @@ async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
     }
     const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
     const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W, H, fps: info.fps || reel.fps, D, keep, look: e.look, layers, encoder, out, ...levels });
-    setJob(ctx, { line: 'Applying your edits…' });
-    await new Promise((resolve, reject) => {
-      const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['ignore', 'pipe', 'pipe'] });
-      ctx.child = child;
-      let errText = '';
-      child.stdout.on('data', (d) => {
-        const m = [...String(d).matchAll(/out_time_us=(\d+)/g)].pop();
-        if (m) setJob(ctx, { pct: clamp((Number(m[1]) / 1e6 / OD) * 100, 0, 99) });
-      });
-      child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
-      child.on('error', reject);
-      child.on('close', (code) => {
-        ctx.child = null;
-        if (code === 0) resolve();
-        else reject(new Error(lastLine(errText) || `ffmpeg exited with code ${code}`));
-      });
-    });
+    ctx.jobs.export.set({ line: 'Applying your edits…' });
+    await runTracked(ctx.jobs.export, ff.path, args, { env: ffmpegEnv(ff), seconds: OD });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1131,7 +1095,7 @@ async function levelsFrom(ctx, body) {
 
 /** Make (or make again) a cutdown: POST { id: preset or output id, keys?, mode?, zoom?, ranges?, music, levels }. */
 async function apiCutdown(ctx, req, res) {
-  if (ctx.cut.state === 'running') throw httpError(409, 'A cutdown is already being made');
+  if (ctx.jobs.cutdown.running) throw httpError(409, 'A cutdown is already being made');
   const body = (await readJson(req)) || {};
   if (typeof body.id !== 'string' || !body.id) throw httpError(400, 'Which cutdown? (id)');
   const reel = await readReel(ctx);
@@ -1141,8 +1105,8 @@ async function apiCutdown(ctx, req, res) {
   }
   const levels = await levelsFrom(ctx, body);
   const fail = (line) => {
-    ctx.cut = { state: 'error', pct: 0, line, id: body.id, label: null };
-    return sendJson(res, 200, ctx.cut);
+    ctx.jobs.cutdown.reset({ state: 'error', line, id: body.id });
+    return sendJson(res, 200, ctx.jobs.cutdown.status);
   };
   const ff = ffmpegFor(ctx);
   if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
@@ -1160,15 +1124,11 @@ async function apiCutdown(ctx, req, res) {
   } catch (err) {
     return fail(err.message);
   }
-  ctx.cut = { state: 'running', pct: 0, line: `Making the ${entry.label} version…`, id: entry.id, label: entry.label };
+  ctx.jobs.cutdown.begin({ line: `Making the ${entry.label} version…`, id: entry.id, label: entry.label });
   runCutdown(ctx, ff, encoder, video, info, reel, entry, levels)
-    .then(() => setCut(ctx, { state: 'done', pct: 100, line: `Saved ${entry.src}` }))
-    .catch((err) => setCut(ctx, { state: 'error', line: err.message }));
-  return sendJson(res, 200, ctx.cut);
-}
-
-function setCut(ctx, patch) {
-  Object.assign(ctx.cut, patch);
+    .then(() => ctx.jobs.cutdown.set({ state: 'done', pct: 100, line: `Saved ${entry.src}` }))
+    .catch((err) => ctx.jobs.cutdown.set({ state: 'error', line: err.message }));
+  return sendJson(res, 200, ctx.jobs.cutdown.status);
 }
 
 /** The encoder for cutdowns: an edit encoder, if this ffmpeg also has setsar. */
@@ -1193,22 +1153,7 @@ async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
   const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
   const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W: info.w, H: info.h, fps: info.fps || reel.fps, D, keep, reframe, encoder, out: tmp, ...levels });
   try {
-    await new Promise((resolve, reject) => {
-      const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['ignore', 'pipe', 'pipe'] });
-      ctx.cutChild = child;
-      let errText = '';
-      child.stdout.on('data', (d) => {
-        const m = [...String(d).matchAll(/out_time_us=(\d+)/g)].pop();
-        if (m) setCut(ctx, { pct: clamp((Number(m[1]) / 1e6 / OD) * 100, 0, 99) });
-      });
-      child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
-      child.on('error', reject);
-      child.on('close', (code) => {
-        ctx.cutChild = null;
-        if (code === 0) resolve();
-        else reject(new Error(lastLine(errText) || `ffmpeg exited with code ${code}`));
-      });
-    });
+    await runTracked(ctx.jobs.cutdown, ff.path, args, { env: ffmpegEnv(ff), seconds: OD });
     fs.renameSync(tmp, final);
   } catch (err) {
     fs.rmSync(tmp, { force: true });
@@ -1227,7 +1172,7 @@ async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
 /** Remove a cutdown made in the player, and its video. */
 async function apiCutdownRemove(ctx, req, res) {
   const body = (await readJson(req)) || {};
-  if (ctx.cut.state === 'running' && ctx.cut.id === body.id) throw httpError(409, 'That cutdown is being made');
+  if (ctx.jobs.cutdown.running && ctx.jobs.cutdown.status.id === body.id) throw httpError(409, 'That cutdown is being made');
   const list = await readPlayerOutputs(ctx.store);
   const o = list.find((x) => x.id === body.id);
   if (!o) throw httpError(404, 'No such cutdown');
@@ -1251,27 +1196,18 @@ async function runRender(ctx, reel, reqProps, levels, out) {
     // export.cmd runs on this computer, in the project folder (or export.cwd, which may be outside it)
     const cwd = reel.export.cwd ? path.resolve(ctx.store.root, String(reel.export.cwd)) : ctx.store.root;
     if (!fs.existsSync(cwd)) throw new Error(`export.cwd not found: ${cwd}`);
-    setJob(ctx, { line: 'Rendering…' });
+    ctx.jobs.export.set({ line: 'Rendering…' });
 
-    await new Promise((resolve, reject) => {
-      const env = { ...process.env, PROPS: propsFile, OUT: out, RAW: raw, PROJECT: ctx.store.root };
-      const child = spawn('sh', ['-c', reel.export.cmd], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-      ctx.child = child;
-      let tail = '';
-      const onData = (d) => {
-        tail = (tail + d).slice(-4000);
-        const pct = progressFromText(String(d));
-        const line = lastLine(d);
-        setJob(ctx, { ...(pct !== null ? { pct: clamp(pct, 0, 99) } : {}), ...(line ? { line } : {}) });
-      };
-      child.stdout.on('data', onData);
-      child.stderr.on('data', onData);
-      child.on('error', reject);
-      child.on('close', (code) => {
-        ctx.child = null;
-        if (code === 0) resolve();
-        else reject(new Error(lastLine(tail) || `export command exited with code ${code}`));
-      });
+    const env = { ...process.env, PROPS: propsFile, OUT: out, RAW: raw, PROJECT: ctx.store.root };
+    await runTracked(ctx.jobs.export, 'sh', ['-c', reel.export.cmd], {
+      cwd,
+      env,
+      what: 'export command',
+      onOutput: (text) => {
+        const pct = progressFromText(text);
+        const line = lastLine(text);
+        ctx.jobs.export.set({ ...(pct !== null ? { pct: clamp(pct, 0, 99) } : {}), ...(line ? { line } : {}) });
+      },
     });
 
     if (!isFile(out)) {
@@ -1283,9 +1219,9 @@ async function runRender(ctx, reel, reqProps, levels, out) {
         await fsp.copyFile(raw, out);
       }
     }
-    setJob(ctx, { state: 'done', pct: 100, line: `Saved ${ctx.store.rel(out)}` });
+    ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${ctx.store.rel(out)}` });
   } catch (err) {
-    setJob(ctx, { state: 'error', line: err.message, out: null, rel: null });
+    ctx.jobs.export.set({ state: 'error', line: err.message, out: null, rel: null });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1572,6 +1508,30 @@ async function selftest() {
     assert.throws(() => buildMixArgs({ ...common, duration: 0 }));
 
     // Plain videos: which file, and its version
+    // JobRunner (lib/jobs.mjs): one task at a time per lane, the status the player polls
+    {
+      const jr = createJobRunner({ a: { state: 'idle', pct: 0, line: '', id: null } });
+      assert.deepEqual(jr.a.status, { state: 'idle', pct: 0, line: '', id: null });
+      jr.a.begin({ line: 'Go', id: 'x' });
+      assert.ok(jr.a.running);
+      assert.deepEqual(jr.a.status, { state: 'running', pct: 0, line: 'Go', id: 'x' });
+      const node = process.execPath;
+      await runTracked(jr.a, node, ['-e', "process.stdout.write('out_time_us=500000\\n')"], { seconds: 1 });
+      assert.equal(jr.a.status.pct, 50, 'ffmpeg -progress output becomes pct');
+      await assert.rejects(runTracked(jr.a, node, ['-e', "console.error('first\\nit broke'); process.exit(3)"]), /it broke/, 'a failure says its last line');
+      await assert.rejects(runTracked(jr.a, node, ['-e', 'process.exit(2)'], { what: 'thing' }), /thing exited with code 2/);
+      const seen = [];
+      await runTracked(jr.a, node, ['-e', "console.log('12%'); console.error('half')"], { onOutput: (t) => seen.push(t.trim()) });
+      assert.deepEqual(seen.sort(), ['12%', 'half']);
+      const slow = runTracked(jr.a, node, ['-e', 'setTimeout(() => {}, 30000)']);
+      await new Promise((r) => setTimeout(r, 100));
+      jr.stopAll();
+      await assert.rejects(slow, /exited|null/, 'stopAll ends a running task');
+      jr.a.set({ state: 'done', pct: 100 });
+      assert.ok(!jr.a.running);
+      jr.a.reset({ state: 'error', line: 'No' });
+      assert.deepEqual(jr.a.status, { state: 'error', pct: 0, line: 'No', id: null });
+    }
     // ProjectStore (lib/store.mjs): the local folder store the routes go through
     {
       const sd = mkTmp();
