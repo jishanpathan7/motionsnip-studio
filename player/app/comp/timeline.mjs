@@ -3,7 +3,7 @@
 //
 // Tracks are layers: a later track draws over an earlier one. Clip times (at, dur) are timeline seconds;
 // in/out are seconds in the clip's source. Keyframes are [t, value, ease?] with t relative to the clip's start.
-import { normScene, toReel as sceneToReel } from '../scene/compile.mjs';
+import { normScene, toReel as sceneToReel, movesOf } from '../scene/compile.mjs';
 
 export const KINDS = ['video', 'scene', 'graphics', 'audio', 'captions'];
 export const VISUAL = new Set(['video', 'scene', 'graphics', 'captions']);
@@ -500,6 +500,17 @@ function sections(tl) {
   return out;
 }
 
+/** A clip's box over its length (keyframes, slide and zoom transitions), for frames that follow it. */
+function clipMoves(c) {
+  const track = [];
+  const n = Math.min(600, Math.ceil(c.dur * 10));
+  for (let i = 0; i <= n; i++) {
+    const u = Math.min(c.dur, i / 10);
+    track.push([r3(c.at + u), ...boxAt(c, u).map((v) => Math.round(v * 10) / 10)]);
+  }
+  return movesOf(track);
+}
+
 function boxAt(c, u) {
   const b = c.box || FULL;
   const s = clipState(c, u);
@@ -525,6 +536,7 @@ export function toReel(raw, { scenes = {}, src = '', exists = null } = {}) {
         label: clipLabel(tr, c),
         t: [c.at, c.end],
         box: tr.kind === 'captions' ? [10, 80, 80, 12] : boxAt(c, Math.min(c.dur / 2, 1)),
+        ...(tr.kind === 'captions' ? {} : clipMoves(c)),
         src: `timeline.json › ${c.path}`,
         clip: c.id,
         track: tr.id,
@@ -578,7 +590,8 @@ function sceneEls(tl, clip, rawSpec) {
       if (b <= a) continue;
       const props = {};
       for (const [k, p] of Object.entries(e.props)) props[k] = p.path ? { ...p, file: clip.scene } : p;
-      out.push({ ...e, id: `${clip.id}/${e.id}`, t: [r3(a), r3(b)], src: `${clip.scene} › ${e.src.split('› ')[1] || ''}`, clip: clip.id, props });
+      const moves = e.moves?.map(([t, ...bx]) => [r3(t + shift), ...bx]).filter(([t]) => t >= a - 0.1 && t <= b + 0.1);
+      out.push({ ...e, ...(moves?.length > 1 ? { moves } : { moves: undefined }), id: `${clip.id}/${e.id}`, t: [r3(a), r3(b)], src: `${clip.scene} › ${e.src.split('› ')[1] || ''}`, clip: clip.id, props });
     }
     off += shot.dur;
   }

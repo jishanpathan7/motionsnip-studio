@@ -59,6 +59,7 @@ Licence: MIT, `Copyright (c) 2026 Jishan Pathan`. Written from scratch from this
     { "id": "S1", "name": "Hook", "t": [0, 4.5], "els": [
       { "id": "headline", "label": "Headline", "t": [0.3, 4.3],
         "box": [20, 38, 60, 24],    // x, y, w, h in % of the frame, or null (voiceover, audio, full-frame footage)
+        "moves": [[0.3, 20, 38, 60, 24], [1.2, 30, 38, 60, 24]], // optional: [t, x, y, w, h] over time; the frame follows it
         "src": "src/Hook.tsx:12",   // file or file:line that draws it
         "props": {
           "text":   { "type": "text",   "label": "Text",   "v": "Meet Acme" },
@@ -127,15 +128,21 @@ node player/server.mjs --selftest
   (append `-2`, `-3`…). Saves to `assets/`. Responds `{ id: "assets/<name>", name, type: "audio" | "image" | "video" }`.
 - `GET /api/formats` → which export formats this ffmpeg can make (`mp4`, `hevc`, `prores`, `webm`, `gif`).
 - Frame export (scene and timeline projects; the browser draws, ffmpeg encodes): `POST /api/frames-start`
-  `{ w, h, fps, frames, format, audio: [{ src, at, in, out, gain, fadeIn, fadeOut }], setSrc, captions }` → `{ job }`;
-  `POST /api/frames-push?job=` with PNGs back to back; `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
-  time, abandoned after 20 s without frames. Audio clips are mixed by ffmpeg (clips with no sound track are skipped).
+  `{ w, h, fps, frames, format, audio: [{ src, at, in, out, gain, fadeIn, fadeOut }], setSrc, captions, pix? }` → `{ job }`;
+  `POST /api/frames-push?job=` with PNGs back to back, or with `pix: "rgba"` raw RGBA frames (w×h×4 bytes each);
+  `?repeat=n` sends the last frame again n times. `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
+  time, abandoned after 20 s without frames. ffmpeg encodes the picture first, then mixes the audio clips under it in a
+  second pass with the picture copied (clips with no sound track are skipped).
   `setSrc` makes the export the project's video; `captions` writes `<export>.srt` and `.vtt` from the timeline's captions.
 - `POST /api/project-apply` `{ file, base?, bump?, patches? | ops? | content? }` → writes `timeline.json`, `scene.json` or
   a scene file the timeline uses: `patches` `[{ path, value }]` only at editable paths, `ops` (timeline edit operations,
   `comp/ops.mjs`) or the whole `content`. `base` is the file's `rev` (short sha1 of its text) the edit started from; a
   mismatch is 409 `{ error, rev }`. `bump` adds 1 to `version` (Apply without Claude); hand edits save in place.
   Responds `{ ok, rev, version }`.
+- `POST /api/timeline-open` `{ content }` → "Open in timeline" for a plain video: writes `content` (made by the player
+  from the video and its edits, `comp/fromplain.mjs`) as `timeline.json`. `content.from` must name the open video; an
+  existing `timeline.json` is never overwritten (409). A server opened on a video file shows the timeline whose `from`
+  is that file; other videos in the folder stay plain.
 - `POST /api/feedback` `{ version, markdown }` → writes `.motionsnip/feedback-v<version>.md`, responds `{ path }` (absolute).
 - `POST /api/export` `{ music, musicVol, sfxVol, musicOffset, musicFade, mode: "mix" | "render", props }` → starts one job
   at a time; `GET /api/export` → `{ state: idle|running|done|error, pct, line, out }`.

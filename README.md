@@ -125,6 +125,7 @@ For a whole video (footage, illustrated scenes, titles, music and captions toget
 - **Make things.** Add text (with animation presets like pop, type-on and word-stagger), shapes, captions and scene clips, or drop videos, pictures and sounds from Finder onto a track.
 - **Animate.** In the Edit tab: transitions in and out (fade, wipe, slide, zoom), keyframes for position, scale, rotation and opacity at the playhead, volume and fades, colour look, text style.
 - **Undo and redo** everything. Every edit is saved into `timeline.json` at once, so Claude works on exactly what you see; if Claude changes the file while you watch, the editor picks it up.
+- **Start from a plain video.** Open any video, trim and cut it, put words, a logo or a blur on it, then **Open in timeline** (in the Edit tab): your edits become clips in `timeline.json` next to the video, and the video file stays as it is.
 - **Ask for something new** in the Changes tab ("a 20 s teaser: a stuck developer, then our app saves the day, with captions"): it goes to Claude with Send.
 - **Export** with sound to MP4, HEVC, ProRes, WebM or GIF at 720p to 4K and 24 to 60 fps, captions drawn in or saved as `.srt` and `.vtt`. Make 9:16, 1:1 and bumper versions from it with Cutdown.
 

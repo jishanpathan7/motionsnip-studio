@@ -17,7 +17,7 @@ import {
 } from './state.js';
 import { api, copyText, fmtTime, round, sameValue, sameBox, toast } from './util.js';
 import { hasEdits as plainEdits, summary as plainSummary } from './vedit.js';
-import { resolveOutput } from './reel.mjs';
+import { resolveOutput, boxAt } from './reel.mjs';
 
 const q = (v) => {
   if (v == null) return 'none';
@@ -361,7 +361,7 @@ function matches(c) {
   }
   if (c.kind === 'box') {
     const el = getEl(c.elId);
-    return !!el?.box && sameBox(el.box, c.after);
+    return !!el?.box && sameBox(boxAt(el, c.at), c.after);
   }
   if (c.kind === 'audio') return sameValue(reel.audio[c.field] ?? null, c.after ?? null);
   if (c.kind === 'brand') return sameValue(reel.brand.colors.find((x) => x.id === c.colorId)?.v, c.after);

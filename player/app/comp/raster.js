@@ -1,5 +1,5 @@
-// Frames to pixels: an SVG frame (or any drawing on a canvas) → PNG bytes, for export. Web fonts don't load
-// inside an SVG drawn as an image, so the fonts it uses are fetched once and inlined as data URLs.
+// Frames to pixels: an SVG frame (or any drawing on a canvas) → pixels, for export. An SVG drawn as an image
+// loads nothing from outside, so the web fonts and pictures it uses are fetched once and inlined as data URLs.
 
 const FONT_CSS = {
   'Patrick Hand': 'https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap',
@@ -42,6 +42,31 @@ export async function inlineFonts(svg) {
   return css.join('\n');
 }
 
+const imageCache = new Map();
+const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+/** The SVG with every <image href> that isn't a data: URL inlined. A picture that fails to load is left as it is. */
+export async function inlineImages(svg) {
+  const hrefs = [...new Set([...svg.matchAll(/<image\b[^>]*?\shref="([^"]+)"/g)].map((m) => m[1]).filter((h) => !h.startsWith('data:')))];
+  if (!hrefs.length) return svg;
+  for (const href of hrefs) {
+    if (!imageCache.has(href))
+      imageCache.set(
+        href,
+        fetch(unesc(href))
+          .then((r) => (r.ok ? r.blob() : null))
+          .then((b) => (b ? toDataUrl(b) : null))
+          .catch(() => null),
+      );
+  }
+  let out = svg;
+  for (const href of hrefs) {
+    const data = await imageCache.get(href);
+    if (data) out = out.split(`href="${href}"`).join(`href="${data}"`);
+  }
+  return out;
+}
+
 /** A drawing surface for export frames at w×h. */
 export function createRaster(w, h) {
   const canvas = document.createElement('canvas');
@@ -49,20 +74,17 @@ export function createRaster(w, h) {
   canvas.height = h;
   const ctx = canvas.getContext('2d');
 
-  /** An SVG document string as a decoded image at w×h, with its web fonts inlined. */
+  /** An SVG document string as a decoded image at w×h, with its web fonts and pictures inlined. */
   async function svgImage(svg, iw = w, ih = h) {
     const fontCss = await inlineFonts(svg);
-    let s = svg.replace('width="100%" height="100%"', `width="${iw}" height="${ih}"`);
+    let s = (await inlineImages(svg)).replace('width="100%" height="100%"', `width="${iw}" height="${ih}"`);
     if (fontCss) s = s.replace(/<svg[^>]*>/, (m) => `${m}<style>${fontCss}</style>`);
-    const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' }));
-    try {
-      const img = new Image();
-      img.src = url;
-      await img.decode();
-      return img;
-    } finally {
-      URL.revokeObjectURL(url);
-    }
+    // a data: URL, not a blob: one: blob URLs load through the browser's network side, where they wait behind
+    // the frame uploads of an export (hundreds of ms a frame)
+    const img = new Image();
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(s)}`;
+    await img.decode();
+    return img;
   }
 
   /** Draw an SVG document string over the canvas (scaled to fill it). */
@@ -94,7 +116,9 @@ export function createRaster(w, h) {
 
 /**
  * Stream frames to the server: start → push batches → end. draw(i, t, raster) paints frame i.
- * opts: { w, h, fps, frames, format, audio, tag, setSrc, onProgress(i, n), signal }. Resolves to the final job.
+ * Frames go as raw RGBA (reading pixels takes milliseconds; encoding a PNG took most of a second at 1080p),
+ * and a frame identical to the one before is sent as a repeat, so still stretches cost no upload.
+ * opts: { w, h, fps, frames, format, audio, tag, setSrc, captions, onProgress(i, n), signal }. Resolves to the final job.
  */
 export async function exportFrames(draw, opts) {
   const post = async (url, body, json = true) => {
@@ -103,37 +127,70 @@ export async function exportFrames(draw, opts) {
     if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), { status: r.status });
     return data;
   };
-  const start = await post('/api/frames-start', JSON.stringify({ w: opts.w, h: opts.h, fps: opts.fps, frames: opts.frames, format: opts.format, audio: opts.audio || [], tag: opts.tag, setSrc: opts.setSrc, captions: !!opts.captions }));
+  const start = await post(
+    '/api/frames-start',
+    JSON.stringify({ w: opts.w, h: opts.h, fps: opts.fps, frames: opts.frames, format: opts.format, audio: opts.audio || [], tag: opts.tag, setSrc: opts.setSrc, captions: !!opts.captions, pix: 'rgba' }),
+  );
   const job = start.job;
   const raster = createRaster(start.w, start.h);
+  const frameBytes = start.w * start.h * 4;
+  const perBatch = Math.max(1, Math.floor(24e6 / frameBytes));
   const batch = [];
-  let size = 0;
+  let repeats = 0;
+  let prev = null;
   let sending = Promise.resolve();
-  const flush = () => {
-    if (!batch.length) return sending;
-    const body = new Blob(batch.splice(0));
-    size = 0;
-    sending = sending.then(() => post(`/api/frames-push?job=${job}`, body, false));
+  // requests go out in order, at most one in flight
+  const send = (url, body) => {
+    sending = sending.then(() => post(url, body, false));
     return sending;
+  };
+  // a Blob uploads several times faster than the same bytes as a typed array; small batches, one in flight,
+  // keep the browser's blob store from filling up
+  const flushFrames = () => {
+    if (!batch.length) return sending;
+    return send(`/api/frames-push?job=${job}`, new Blob(batch.splice(0)));
+  };
+  const flushRepeats = () => {
+    if (!repeats) return sending;
+    const n = repeats;
+    repeats = 0;
+    return send(`/api/frames-push?job=${job}&repeat=${n}`, new Uint8Array(0));
   };
   try {
     for (let i = 0; i < start.frames; i++) {
       if (opts.signal?.aborted) throw new Error('Cancelled');
       await draw(i, i / start.fps, raster);
-      const png = await raster.png();
-      batch.push(png);
-      size += png.length;
-      if (size > 6e6 || batch.length >= 24) {
-        await sending; // keep at most one batch in flight
-        flush();
+      const px = raster.ctx.getImageData(0, 0, start.w, start.h).data;
+      const words = new Uint32Array(px.buffer);
+      if (prev && sameWords(prev, words)) repeats++;
+      else {
+        if (repeats) {
+          await sending;
+          flushFrames();
+          flushRepeats();
+        }
+        batch.push(px);
+        prev = words;
+        if (batch.length >= perBatch) {
+          await sending; // keep at most one batch in flight
+          flushFrames();
+        }
       }
       opts.onProgress?.(i + 1, start.frames);
     }
-    await flush();
+    flushFrames();
+    await flushRepeats();
+    await sending;
     return await post(`/api/frames-end?job=${job}`, '{}');
   } catch (e) {
     await sending.catch(() => {});
     await post(`/api/frames-end?job=${job}&cancel=1`, '{}').catch(() => {});
     throw e;
   }
+}
+
+function sameWords(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

@@ -6,7 +6,8 @@
 import { store, bus, persist, setTab } from './state.js';
 import { player, hooks, seek, pause, play, currentTime, isPlaying, duration } from './video.js';
 import { timelineParts } from './timeline.js';
-import { h, svg, icon, clamp, round, fmtTime, toast, projectUrl, newId } from './util.js';
+import { h, svg, icon, clamp, round, fmtTime, toast, projectUrl, newId, api } from './util.js';
+import { timelineFromPlain } from './comp/fromplain.mjs';
 
 const FONTS = {
   display: ['Display', '"Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif'],
@@ -1049,7 +1050,33 @@ export function renderPane() {
       hasEdits() ? holdOriginalBtn() : null,
     ),
   );
+  // Timeline
+  if (store.reel.duration > 0)
+    wrap.append(
+      section(
+        'Timeline',
+        null,
+        h('p.muted.small', 'More clips, music, a scene or captions? Open it in the timeline. Your trim, cuts, colour and layers come along, and the video file stays as it is.'),
+        h('div.row-actions', h('button.btn.btn-sm', { type: 'button', onclick: openInTimeline }, 'Open in timeline')),
+      ),
+    );
   return wrap;
+}
+
+/** Turn this video and its edits into the folder's timeline.json, then load it as a timeline project. */
+async function openInTimeline(ev) {
+  const btn = ev?.currentTarget;
+  if (btn) btn.disabled = true;
+  try {
+    const r = store.reel;
+    const content = timelineFromPlain({ src: r.src, title: r.title, w: r.w, h: r.h, fps: r.fps, duration: r.duration }, get(), ve.heights);
+    await api('/api/timeline-open', { json: { content } });
+    toast('Opened in the timeline. It lives in timeline.json next to the video.');
+    location.reload();
+  } catch (e) {
+    toast(`Couldn't open it in the timeline: ${e.message}`, { kind: 'error', ms: 6000 });
+    if (btn) btn.disabled = false;
+  }
 }
 
 function setCutEdge(ed, i, ix, v) {

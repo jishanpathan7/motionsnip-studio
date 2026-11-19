@@ -351,6 +351,7 @@ When the video mixes things (the user's footage, a scene or two, titles and lowe
 - Tracks take `mute`, `solo`, `hide`, `lock` and `gain`. The user locks a track to keep it as it is: don't change clips on a locked track.
 - Ids: tracks `v1`, `s1`, `g1`, `a1`, `cc1`; clips any short unique id. Keep them stable: notes, rings and the user's selection follow them. Notes and feedback name paths like `timeline.json › tracks[2].clips[0].text`.
 - Media files live in the project (`assets/`). Use only footage, music and images the user gave you or has rights to.
+- A `timeline.json` with `"from": "<video file>"` was made by **Open in timeline** from that plain video and the user's edits (trim and cuts are back-to-back clips of it). Keep `from` as it is: it tells the player which video the timeline belongs to.
 
 **Plain words to fields:** "tighter" is shorter clips and less space between them; "punchier titles" is `pop` or `word-stagger`, a heavier `weight`, a bigger `size`; "a slow zoom" is `scale` keys from 1 to 1.05–1.1; "softer cut" is an `enter`/`exit` fade of 0.3–0.6 s; "music too loud under the voice" is a lower music `gain`; "subtitles" are a captions track, one short line per clip, at least about 1 s per 3 words.
 

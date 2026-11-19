@@ -28,6 +28,7 @@ import {
 } from './state.js';
 import { player, isPlaying, pause, toggle, currentTime, pushLiveBoxes, seek } from './video.js';
 import { h, svg, clamp, round, prefersReducedMotion, toast } from './util.js';
+import { boxAt } from './reel.mjs';
 
 const ov = {
   frame: null,
@@ -92,7 +93,7 @@ function inBox(b, p) {
 /** Elements under a point, smallest first. */
 export function elsAt(p, t = currentTime()) {
   return visibleEls(t)
-    .map((el) => ({ el, b: boxValue(el.id) }))
+    .map((el) => ({ el, b: boxValue(el.id, t) }))
     .filter((x) => inBox(x.b, p))
     .sort((a, b) => a.b[2] * a.b[3] - b.b[2] * b.b[3])
     .map((x) => x.el);
@@ -112,7 +113,7 @@ function noteVisible(n, t) {
 export function render(force = false) {
   if (!store.reel) return;
   const t = currentTime();
-  const vis = visibleEls(t).filter((el) => boxValue(el.id));
+  const vis = visibleEls(t).filter((el) => boxValue(el.id, t));
   const ns = notes().filter((n) => noteVisible(n, t));
   const fs = store.ui.compare ? [] : openFindings().filter((f) => findingSpot(f) && findingVisible(f, t));
   const sig = [
@@ -123,11 +124,16 @@ export function render(force = false) {
     isPlaying() ? 'p' : 's',
     store.ui.compare ? 'c' : '',
     ov.hover,
+    // frames that follow a moving element redraw as it moves
+    vis
+      .filter((el) => el.moves)
+      .map((el) => boxValue(el.id, t).join(' '))
+      .join(','),
   ].join('|');
   if (!force && sig === ov.sig) return;
   ov.sig = sig;
   if (ov.drag?.active) return; // the drag draws its own preview
-  renderBoxes(vis);
+  renderBoxes(vis, t);
   renderNotes(ns);
   renderSpots(fs);
 }
@@ -233,13 +239,13 @@ export function closeSpot(rerender = true) {
   return true;
 }
 
-function renderBoxes(vis) {
+function renderBoxes(vis, t) {
   const frag = document.createDocumentFragment();
   const playing = isPlaying();
   const live = !!player.live;
   for (const el of vis) {
-    const b = boxValue(el.id);
-    const orig = el.box;
+    const b = boxValue(el.id, t);
+    const orig = boxAt(el, t);
     const edited = elHasEdits(el.id);
     const moved = !!findChange(`box:${el.id}`);
     const sel = store.ui.selected === el.id;
@@ -431,12 +437,13 @@ function drawDragPreview(el, b) {
     node.classList.toggle('is-moved', !player.live);
   }
   let ghost = ov.boxes.querySelector('.ov-ghost.drag');
-  if (!ghost && el.box && !player.live) {
-    ghost = h('div.ov-ghost.drag', { style: posStyle(el.box) });
+  const ob = boxAt(el, currentTime());
+  if (!ghost && ob && !player.live) {
+    ghost = h('div.ov-ghost.drag', { style: posStyle(ob) });
     ov.boxes.prepend(ghost);
   }
-  if (player.live && el.box) pushLiveBoxes({ id: el.id, before: el.box, after: b });
-  const sc = Math.sqrt((b[2] * b[3]) / (el.box[2] * el.box[3]));
+  if (player.live && ob) pushLiveBoxes({ id: el.id, before: ob, after: b });
+  const sc = Math.sqrt((b[2] * b[3]) / (ob[2] * ob[3]));
   bus.emit('hint', { text: `[${b.map((v) => round(v, 1)).join(', ')}] · scale ${round(sc, 2)} · Shift keeps the shape` });
 }
 

@@ -40,6 +40,33 @@ function normProp(key, p) {
   return out;
 }
 
+/** An element's box over time: [[t, x, y, w, h], …] sorted by t, or undefined. */
+export function normMoves(m) {
+  if (!Array.isArray(m)) return undefined;
+  const out = m.filter((p) => Array.isArray(p) && p.length === 5 && p.every((v) => Number.isFinite(Number(v)))).map((p) => p.map(Number));
+  out.sort((a, b) => a[0] - b[0]);
+  return out.length > 1 ? out : undefined;
+}
+
+/** Where an element's box is at time t: between its moves when it has them, else its box. */
+export function boxAt(el, t) {
+  const m = el?.moves;
+  if (!m || !Number.isFinite(t)) return el?.box || null;
+  if (t <= m[0][0]) return m[0].slice(1);
+  const last = m[m.length - 1];
+  if (t >= last[0]) return last.slice(1);
+  let lo = 0;
+  let hi = m.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (m[mid][0] <= t) lo = mid;
+    else hi = mid;
+  }
+  const [p, q] = [m[lo], m[hi]];
+  const k = (t - p[0]) / Math.max(1e-9, q[0] - p[0]);
+  return [1, 2, 3, 4].map((i) => Math.round((p[i] + (q[i] - p[i]) * k) * 10) / 10);
+}
+
 export function normalizeReel(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   const duration = num(r.duration, 0);
@@ -102,7 +129,7 @@ export function normalizeReel(raw) {
           .map((e) => {
             const props = {};
             if (e.props && typeof e.props === 'object') for (const [k, p] of Object.entries(e.props)) props[k] = normProp(k, p);
-            return { ...e, id: String(e.id), label: String(e.label || e.id), t: pair(e.t, t), box: normBox(e.box), src: e.src || '', props };
+            return { ...e, id: String(e.id), label: String(e.label || e.id), t: pair(e.t, t), box: normBox(e.box), moves: normMoves(e.moves), src: e.src || '', props };
           }),
       };
     });

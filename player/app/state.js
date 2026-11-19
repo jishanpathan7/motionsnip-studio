@@ -5,7 +5,7 @@
 // `.motionsnip/state.json` (POST /api/state, debounced). On load the newer copy wins.
 
 import { Emitter, api, debounce, newId, sameValue, sameBox, baseName } from './util.js';
-import { normalizeReel, resolveOutput, outTime, masterTime } from './reel.mjs';
+import { normalizeReel, resolveOutput, outTime, masterTime, boxAt } from './reel.mjs';
 
 export const bus = new Emitter();
 
@@ -85,9 +85,10 @@ export function propValue(elId, key) {
   return getEl(elId)?.props[key]?.v;
 }
 
-export function boxValue(elId) {
+/** An element's box at time t (default: the playhead): the reviewer's change, else where it is then. */
+export function boxValue(elId, t = store.ui.t) {
   const c = findChange(`box:${elId}`);
-  return c ? c.after : getEl(elId)?.box || null;
+  return c ? c.after : boxAt(getEl(elId), t);
 }
 
 export function audioValue(field) {
@@ -293,11 +294,14 @@ export function setBox(elId, box) {
   if (!el || !el.box) return;
   const ck = `box:${elId}`;
   const nb = box.map((v) => Math.round(v * 10) / 10);
-  if (editHooks.box?.(el, nb)) return;
-  if (sameBox(el.box, nb, 0.05)) remove(ck);
+  // a moving element: the change is from where it was at that moment
+  const at = atFor(el);
+  const ob = boxAt(el, at);
+  if (editHooks.box?.({ ...el, box: ob }, nb)) return;
+  if (sameBox(ob, nb, 0.05)) remove(ck);
   else {
-    const scale = Math.round(Math.sqrt((nb[2] * nb[3]) / Math.max(1e-6, el.box[2] * el.box[3])) * 100) / 100;
-    upsert({ kind: 'box', key: ck, elId, before: el.box.slice(), after: nb, scale, at: atFor(el) });
+    const scale = Math.round(Math.sqrt((nb[2] * nb[3]) / Math.max(1e-6, ob[2] * ob[3])) * 100) / 100;
+    upsert({ kind: 'box', key: ck, elId, before: ob.slice(), after: nb, scale, at });
   }
   changed({ key: ck, elId, box: true });
 }
