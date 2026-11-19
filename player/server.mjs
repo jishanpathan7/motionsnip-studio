@@ -6,6 +6,7 @@
 //
 //   node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
 //                          [--addons <dir>]… [--no-addons] [--safe]
+//   node player/server.mjs --activate <key> | --install-pro | --deactivate | --licence   (MotionSnip Pro)
 //   node player/server.mjs --selftest
 //
 // A folder with a reel.json is a Claude-built project. A folder without one (or a
@@ -28,6 +29,8 @@ import { toReel as sceneToReel, applyPatches as applyScenePatches, normScene } f
 import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTimeline, captionCues, toSrt, toVtt } from './app/comp/timeline.mjs';
 import { applyOps } from './app/comp/ops.mjs';
 import { loadAddons, addonList, defaultAddonDirs } from './lib/addons.mjs';
+import { createPro, PRO_ID } from './lib/pro.mjs';
+import { motionsnipHome } from './lib/licence.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, buildMuxArgs, countPngs } from './lib/frames.mjs';
 import { normComposeSpec, buildComposeArgs } from './lib/compose.mjs';
 import { JSON_LIMIT, extOf, mimeFor, parseRange, hostAllowed, originAllowed, readBody, readJson, httpError, sendJson, sendJsonTagged, sendError, sendFile } from './lib/http.mjs';
@@ -329,11 +332,19 @@ export async function startServer(opts) {
     // false (--safe): code from the project folder never runs: no export.cmd, no live.js
     projectCode: opts.projectCode !== false,
   };
+  const log = opts.quiet ? () => {} : (...a) => console.log(...a);
+  // Pro: the licence in opts.home (~/.motionsnip when started from the command line); off without a home
+  ctx.pro = opts.home ? await createPro({ home: opts.home, keys: opts.licenceKeys, server: opts.licenceServer, fetch: opts.fetch, log }) : null;
   // add-ons from opts.addons (folders that hold add-on folders); none unless asked for
-  ctx.addons = await loadAddons(opts.addons || [], {
-    log: opts.quiet ? () => {} : (...a) => console.log(...a),
-    helpers: { sendJson, sendError, readJson, httpError, resolveInside, projectDir: () => ctx.store.root, store: ctx.store, ffmpeg: () => ffmpegFor(ctx) },
-  });
+  ctx.addonDirs = (opts.addons || []).map((d) => path.resolve(d));
+  ctx.loadAddons = async () => {
+    ctx.addons = await loadAddons(ctx.addonDirs, {
+      log,
+      entitled: (name, o) => !!ctx.pro?.entitled(name, o),
+      helpers: { sendJson, sendError, readJson, httpError, resolveInside, projectDir: () => ctx.store.root, store: ctx.store, ffmpeg: () => ffmpegFor(ctx) },
+    });
+  };
+  await ctx.loadAddons();
   const server = http.createServer((req, res) => {
     handle(ctx, req, res).catch((err) => {
       // Our own httpError messages are short and meant for the player; anything else stays in the log.
@@ -354,6 +365,9 @@ export async function startServer(opts) {
   const url = `http://localhost:${port}`;
   if (!opts.quiet) console.log(`MotionSnip Studio: ${url}  (project: ${store.root})`);
   if (opts.open) openInBrowser(url);
+  // a licence that ends within 7 days is refreshed quietly (the only call made without you asking, and only
+  // when you have a licence); offline, Pro keeps working until it ends
+  if (ctx.pro) ctx.pro.maybeRefresh().then((done) => done && ctx.loadAddons()).catch(() => {});
   return {
     server,
     port,
@@ -513,6 +527,12 @@ async function api(ctx, req, res, route, url) {
     }
     case 'GET addons':
       return sendJson(res, 200, { addons: addonList(ctx.addons) });
+    case 'GET licence':
+    case 'POST licence/activate':
+    case 'POST licence/refresh':
+    case 'POST licence/deactivate':
+    case 'POST licence/install':
+      return apiLicence(ctx, req, res, key);
     default: {
       // /api/addons/<id>/<name>: a route an add-on registered
       const hit = /^addons\/([^/]+)\/([^/]+)$/.exec(route);
@@ -522,6 +542,39 @@ async function api(ctx, req, res, route, url) {
       return sendError(res, 404, 'Unknown API route');
     }
   }
+}
+
+/** What the player sees of the Pro licence and add-on: never the key or the licence itself. */
+function licenceView(ctx) {
+  const st = ctx.pro.status();
+  const a = ctx.addons.get(PRO_ID);
+  return {
+    state: st.state,
+    reason: st.reason,
+    plan: st.plan,
+    expires: st.expires,
+    periodEnd: st.periodEnd,
+    updatesUntil: st.updatesUntil,
+    addon: a ? { state: a.state, version: a.version, reason: a.reason || '' } : null,
+    buy: 'https://motionsnip.com/pro/',
+  };
+}
+
+/** /api/licence: the Pro licence (GET), and activate, refresh, deactivate and install (POST). */
+async function apiLicence(ctx, req, res, key) {
+  if (!ctx.pro) return sendError(res, 404, 'Pro licences are off for this server');
+  if (key === 'GET licence') return sendJson(res, 200, licenceView(ctx));
+  const body = (await readJson(req)) || {};
+  if (key === 'POST licence/activate') await ctx.pro.activate(body.key);
+  else if (key === 'POST licence/refresh') await ctx.pro.refresh();
+  else if (key === 'POST licence/deactivate') await ctx.pro.deactivate();
+  else if (key === 'POST licence/install') {
+    await ctx.pro.install();
+    // the Pro add-on lives in <home>/addons; load it even when the add-on folders were chosen with --addons
+    if (!ctx.addonDirs.includes(ctx.pro.addonsDir)) ctx.addonDirs.push(ctx.pro.addonsDir);
+  }
+  await ctx.loadAddons();
+  return sendJson(res, 200, licenceView(ctx));
 }
 
 /** Load reel.json (or, with none, the plain video's made-up reel), or throw an http error with a short message. */
@@ -2423,8 +2476,8 @@ async function selftest() {
         const by = Object.fromEntries(r.json.addons.map((a) => [a.id, a]));
         assert.deepEqual(Object.keys(by).sort(), ['appy', 'badjson', 'broken', 'escape', 'future', 'hello', 'noexport', 'paid', 'wrongname']);
         assert.equal(by.hello.state, 'on');
-        assert.equal(by.hello.app, '/addons/hello/app.js');
-        assert.equal(by.appy.app, '/addons/appy/ui/app.js');
+        assert.match(by.hello.app, /^\/addons\/hello\/app\.js\?t=\d+$/);
+        assert.match(by.appy.app, /^\/addons\/appy\/ui\/app\.js\?t=\d+$/);
         assert.equal(by.paid.state, 'locked');
         assert.equal(by.paid.reason, 'Needs a pro licence');
         assert.equal(by.paid.app, undefined, 'a locked add-on offers no app');
@@ -2461,6 +2514,204 @@ async function selftest() {
       const bare = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true });
       assert.deepEqual((await request(bare.port, 'GET', '/api/addons')).json, { addons: [] });
       await bare.close();
+    }
+
+    // Pro: the signed licence, the tar reader, and activate / install / refresh / deactivate against a fake
+    // licence server
+    {
+      const L = await import('./lib/licence.mjs');
+      const { readTar, writeTar, safeEntryPath } = await import('./lib/tar.mjs');
+      const { packageSigText } = await import('./lib/pro.mjs');
+      const { spawnSync } = await import('node:child_process');
+      const { ADDON_API } = await import('./lib/addons.mjs');
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+      const keys = { t1: publicKey.export({ format: 'jwk' }).x };
+      const signText = (text) => crypto.sign(null, Buffer.from(text), privateKey).toString('base64url');
+      const sign = (claims, kid = 't1') => ({ v: 1, kid, claims, sig: signText(L.canonical(claims)) });
+      const DAY = 86400e3;
+      const iso = (ms) => new Date(ms).toISOString();
+      const now = Date.parse('2026-12-01T00:00:00Z');
+      const inst = L.hashInstall('abc');
+      const claims = (o = {}) => ({ sub: 'k1', act: 'a1', plan: 'pro', features: ['pro'], install: inst, issued: iso(now - DAY), expires: iso(now + 30 * DAY), updates_until: iso(now), ...o });
+      const v = (lic, o = {}) => L.verifyLicence(lic, { keys, now, install: inst, ...o });
+
+      assert.equal(L.canonical({ b: 1, a: [{ d: 2, c: null }] }), '{"a":[{"c":null,"d":2}],"b":1}');
+      assert.equal(v(null).state, 'none');
+      assert.equal(v(sign(claims())).state, 'valid');
+      assert.equal(v(sign(claims({ expires: iso(now + 5 * DAY) }))).state, 'grace', 'within 14 days of the end: grace');
+      assert.equal(v(sign(claims({ expires: null }))).state, 'valid', 'a lifetime licence');
+      assert.equal(v(sign(claims({ expires: null }))).periodEnd, null);
+      const lapsed = v(sign(claims({ expires: iso(now - DAY), updates_until: iso(now - 30 * DAY) })));
+      assert.equal(lapsed.state, 'fallback');
+      assert.ok(L.holds(lapsed, 'pro', { released: iso(now - 40 * DAY) }), 'a version released while paid keeps working');
+      assert.ok(!L.holds(lapsed, 'pro', { released: iso(now - 10 * DAY) }), 'a version released after it lapsed does not');
+      assert.ok(!L.holds(lapsed, 'pro'), 'no release date: no fallback');
+      assert.equal(v(sign(claims({ expires: iso(now - DAY), updates_until: null }))).state, 'expired');
+      const forged = sign(claims());
+      forged.claims.features = ['pro', 'team'];
+      assert.equal(v(forged).state, 'invalid', 'a changed claim breaks the signature');
+      assert.equal(v({ ...sign(claims()), kid: 'nope' }).state, 'invalid');
+      assert.equal(v(sign(claims()), { install: L.hashInstall('other') }).reason, 'This licence was activated on another computer');
+      assert.equal(v({ v: 2 }).state, 'invalid');
+      const otherKey = crypto.generateKeyPairSync('ed25519').privateKey;
+      assert.equal(v({ v: 1, kid: 't1', claims: claims(), sig: crypto.sign(null, Buffer.from(L.canonical(claims())), otherKey).toString('base64url') }).state, 'invalid', 'signed by someone else');
+      assert.ok(L.holds(v(sign(claims())), 'pro') && !L.holds(v(sign(claims())), 'team'));
+
+      // install id: made once, kept
+      const home0 = mkTmp();
+      assert.equal(await L.installId(home0, { create: false }), null);
+      const id1 = await L.installId(home0);
+      assert.equal(await L.installId(home0), id1);
+      assert.equal(fs.statSync(path.join(home0, 'install-id')).mode & 0o077, 0, 'install-id is private');
+
+      // tar: round trip, readable by the system tar, and unsafe entries refused
+      const tarBuf = writeTar([{ path: 'pkg/', data: null }, { path: 'pkg/a.txt', data: 'hello' }, { path: `pkg/${'d'.repeat(90)}/${'f'.repeat(60)}.js`, data: Buffer.alloc(700, 1) }]);
+      const back = readTar(tarBuf);
+      assert.deepEqual(back.map((e) => e.path), ['pkg', 'pkg/a.txt', `pkg/${'d'.repeat(90)}/${'f'.repeat(60)}.js`]);
+      assert.equal(back[1].data.toString(), 'hello');
+      assert.equal(back[2].data.length, 700);
+      const sysTar = spawnSync('tar', ['-tf', '-'], { input: tarBuf });
+      if (sysTar.status === 0) assert.match(sysTar.stdout.toString(), /pkg\/a\.txt/);
+      const patch = (buf, at, text) => {
+        const b = Buffer.from(buf);
+        b.write(text, at);
+        b.fill(32, 148, 156);
+        let sum = 0;
+        for (let i = 0; i < 512; i++) sum += b[i];
+        b.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+        return b;
+      };
+      const one = writeTar([{ path: 'xx/evil', data: 'x' }]);
+      assert.throws(() => readTar(patch(one, 0, '../evil')), /unsafe path/);
+      assert.throws(() => readTar(patch(one, 0, '/x/evil')), /unsafe path/);
+      assert.throws(() => readTar(patch(one, 156, '2')), /only files and folders/, 'links are refused');
+      const broken = Buffer.from(one);
+      broken[10] ^= 1;
+      assert.throws(() => readTar(broken), /checksum/);
+      assert.ok(safeEntryPath('a/b.js') && !safeEntryPath('a/../b') && !safeEntryPath('a\\b') && !safeEntryPath('C:/x'));
+
+      // a fake licence server
+      const pkgFiles = (version, released) =>
+        writeTar([
+          { path: 'addon.json', data: JSON.stringify({ id: 'pro', name: 'MotionSnip Pro', version, core: ADDON_API, app: 'app.js', requires: 'pro', released, provides: { presets: ['ui.terminal'] } }) },
+          { path: 'app.js', data: 'export default () => {};' },
+        ]);
+      const fake = { pkg: pkgFiles('0.1.0', '2026-11-01'), refreshes: 0, badPackage: false, licenceFor: null };
+      const fakeSrv = http.createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
+        const send = (status, data) => {
+          res.writeHead(status, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(data));
+        };
+        const t = Date.now();
+        const issue = (install) => sign(fake.licenceFor ? fake.licenceFor(install) : { sub: 'k1', act: 'a1', plan: 'pro', features: ['pro'], install, issued: iso(t), expires: iso(t + 44 * DAY), updates_until: iso(t) });
+        if (req.url === '/activate') {
+          if (body.key === 'REVOKED-KEY-0000') return send(403, { error: 'This licence key was revoked' });
+          return send(200, { licence: issue(body.install) });
+        }
+        if (req.url === '/refresh') {
+          fake.refreshes++;
+          return send(200, { licence: issue(body.licence.claims.install) });
+        }
+        if (req.url === '/deactivate') return send(200, { ok: true });
+        if (req.url === '/download') {
+          const sha = crypto.createHash('sha256').update(fake.pkg).digest('hex');
+          const version = JSON.parse(readTar(fake.pkg).find((e) => e.path === 'addon.json').data).version;
+          // badPackage: the bytes don't match the (signed) hash, as when a download is cut or changed on the way
+          const told = fake.badPackage ? sha.replace(/^./, (c) => (c === '0' ? '1' : '0')) : sha;
+          return send(200, { version, sha256: told, kid: 't1', sig: signText(packageSigText('pro', version, told)), url: '/pkg' });
+        }
+        if (req.url === '/pkg') {
+          res.writeHead(200, { 'content-type': 'application/x-tar' });
+          return res.end(fake.pkg);
+        }
+        send(404, { error: 'no' });
+      });
+      await new Promise((r) => fakeSrv.listen(0, '127.0.0.1', r));
+      const fakeUrl = `http://127.0.0.1:${fakeSrv.address().port}`;
+
+      const home = mkTmp();
+      const addonsDir = path.join(home, 'addons');
+      const srv = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true, home, licenceKeys: keys, licenceServer: fakeUrl, addons: [addonsDir] });
+      try {
+        const post = (route, json = {}, origin = `http://localhost:${srv.port}`) => request(srv.port, 'POST', `/api/licence${route}`, { body: JSON.stringify(json), headers: { 'content-type': 'application/json', origin } });
+        let r = await request(srv.port, 'GET', '/api/licence');
+        assert.equal(r.json.state, 'none');
+        assert.equal(r.json.addon, null);
+        assert.equal((await post('/activate', { key: 'nope' })).status, 400);
+        assert.equal((await post('/activate', { key: 'GOOD-KEY-1234' }, 'http://evil.example')).status, 403);
+        r = await post('/activate', { key: 'REVOKED-KEY-0000' });
+        assert.equal(r.status, 400);
+        assert.equal(r.json.error, 'This licence key was revoked');
+        assert.equal((await post('/install')).status, 409, 'install needs a licence');
+        r = await post('/activate', { key: 'GOOD-KEY-1234' });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        assert.equal(r.json.state, 'valid');
+        for (const k of ['key', 'sub', 'act', 'sig', 'claims', 'install']) assert.ok(!(k in r.json), `the player never sees ${k}`);
+        assert.equal(fs.statSync(path.join(home, 'licence.json')).mode & 0o077, 0, 'licence.json is private');
+
+        r = await post('/install');
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        assert.deepEqual(r.json.addon, { state: 'on', version: '0.1.0', reason: '' });
+        let list = (await request(srv.port, 'GET', '/api/addons')).json.addons;
+        assert.deepEqual(list.find((a) => a.id === 'pro').presets, ['ui.terminal']);
+
+        // an update replaces it; a damaged download leaves the installed one alone
+        fake.pkg = pkgFiles('0.2.0', '2026-11-20');
+        assert.equal((await post('/install')).json.addon.version, '0.2.0');
+        fake.pkg = pkgFiles('0.3.0', '2026-11-25');
+        fake.badPackage = true;
+        r = await post('/install');
+        assert.equal(r.status, 502);
+        assert.match(r.json.error, /didn't arrive whole/);
+        fake.badPackage = false;
+        assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.version, '0.2.0');
+        assert.deepEqual(fs.readdirSync(addonsDir), ['pro'], 'no staging folders left');
+
+        // lapsed: versions released while paid keep working; later ones lock
+        const hashHere = JSON.parse(fs.readFileSync(path.join(home, 'licence.json'), 'utf8')).claims.install;
+        const t = Date.now();
+        await L.writeLicence(home, sign(claims({ install: hashHere, expires: iso(t - DAY), updates_until: '2026-11-22T00:00:00Z' })));
+        await srv.ctx.loadAddons();
+        r = await request(srv.port, 'GET', '/api/licence');
+        assert.equal(r.json.state, 'fallback');
+        assert.equal(r.json.addon.state, 'on', '0.2.0 (released 2026-11-20) was released while paid');
+        await L.writeLicence(home, sign(claims({ install: hashHere, expires: iso(t - DAY), updates_until: '2026-11-10T00:00:00Z' })));
+        await srv.ctx.loadAddons();
+        assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.state, 'locked');
+
+        // refresh: by hand, and quietly at start when it ends within 7 days
+        r = await post('/refresh');
+        assert.equal(r.json.state, 'valid');
+        assert.equal(r.json.addon.state, 'on');
+        await L.writeLicence(home, sign(claims({ install: hashHere, expires: iso(t + 3 * DAY) })));
+        const before = fake.refreshes;
+        const again = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true, home, licenceKeys: keys, licenceServer: fakeUrl, addons: [addonsDir] });
+        for (let i = 0; i < 50 && fake.refreshes === before; i++) await new Promise((res) => setTimeout(res, 20));
+        await again.close();
+        assert.equal(fake.refreshes, before + 1, 'a licence ending soon is refreshed at start');
+
+        // deactivate: the licence goes, Pro locks
+        r = await post('/deactivate');
+        assert.equal(r.json.state, 'none');
+        assert.equal(r.json.addon.state, 'locked');
+        assert.ok(!fs.existsSync(path.join(home, 'licence.json')));
+      } finally {
+        await srv.close();
+      }
+      // the licence server can't be reached: a short message
+      const off = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true, home: mkTmp(), licenceKeys: keys, licenceServer: 'http://127.0.0.1:9' });
+      const offR = await request(off.port, 'POST', '/api/licence/activate', { body: '{"key":"GOOD-KEY-1234"}', headers: { 'content-type': 'application/json', origin: `http://localhost:${off.port}` } });
+      assert.equal(offR.status, 503);
+      assert.match(offR.json.error, /Couldn't reach the licence server/);
+      await off.close();
+      await new Promise((r) => fakeSrv.close(r));
+      // no home (how the selftest's other servers run): no licence routes
+      const noPro = await startServer({ dir: mkTmp(), port: 0, open: false, quiet: true });
+      assert.equal((await request(noPro.port, 'GET', '/api/licence')).status, 404);
+      await noPro.close();
     }
 
     // Safe mode: export.cmd and a live.js script are left out of the reel, and a render export is refused
@@ -2513,7 +2764,7 @@ async function selftest() {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null, safe: false };
+  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null, safe: false, activate: null, installPro: false, deactivate: false, licence: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -2528,6 +2779,10 @@ function parseArgs(argv) {
     else if (a === '--addons' || a.startsWith('--addons=')) (opts.addons ||= []).push(value());
     else if (a === '--no-addons') opts.addons = [];
     else if (a === '--safe') opts.safe = true;
+    else if (a === '--activate' || a.startsWith('--activate=')) opts.activate = value();
+    else if (a === '--install-pro') opts.installPro = true;
+    else if (a === '--deactivate') opts.deactivate = true;
+    else if (a === '--licence' || a === '--license') opts.licence = true;
     else if (a === '-h' || a === '--help') opts.help = true;
     else if (a.startsWith('--')) throw new Error(`Unknown option ${a}`);
     else opts.dir = a;
@@ -2546,11 +2801,12 @@ async function main() {
   }
   if (opts.help) {
     console.log(
-      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons] [--safe]\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).\n--safe: never run code from the project folder (reel.json export.cmd, a live.js renderer).',
+      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons] [--safe]\n       node player/server.mjs --activate <key> | --install-pro | --deactivate | --licence\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).\n--safe: never run code from the project folder (reel.json export.cmd, a live.js renderer).',
     );
     return;
   }
   if (opts.selftest) process.exit(await selftest());
+  if (opts.activate || opts.installPro || opts.deactivate || opts.licence) process.exit(await licenceCli(opts));
 
   let dir = path.resolve(opts.dir || '.');
   let video = null;
@@ -2576,10 +2832,35 @@ async function main() {
   if (opts.ffmpeg && !isExecutable(opts.ffmpeg)) console.warn(`Note: --ffmpeg ${opts.ffmpeg} is not an executable file.`);
 
   if (opts.safe) console.log("Safe mode: the project's export.cmd and live.js won't run.");
-  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg, addons: opts.addons ?? defaultAddonDirs(), projectCode: !opts.safe });
+  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg, addons: opts.addons ?? defaultAddonDirs(), projectCode: !opts.safe, home: motionsnipHome() });
   const stop = () => app.close().then(() => process.exit(0));
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+}
+
+/** --activate <key>, --install-pro, --deactivate, --licence: manage Pro from the command line. */
+async function licenceCli(opts) {
+  const pro = await createPro({ home: motionsnipHome() });
+  const say = (st) => {
+    const until = st.expires === null ? 'never ends' : st.expires ? `paid until ${st.periodEnd.slice(0, 10)}, works offline until ${st.expires.slice(0, 10)}` : '';
+    console.log(`Pro licence: ${st.state}${st.reason ? ` (${st.reason})` : ''}${until ? `; ${until}` : ''}`);
+  };
+  try {
+    if (opts.activate) say(await pro.activate(opts.activate));
+    if (opts.installPro || opts.activate) {
+      const { version } = await pro.install();
+      console.log(`Pro add-on ${version} installed in ${path.join(pro.addonsDir, PRO_ID)}`);
+    }
+    if (opts.deactivate) {
+      await pro.deactivate();
+      console.log('Pro deactivated on this computer; the licence key can be used on another one.');
+    }
+    if (opts.licence) say(pro.status());
+    return 0;
+  } catch (e) {
+    console.error(e.message);
+    return 1;
+  }
 }
 
 // Run only when started directly (not when imported).

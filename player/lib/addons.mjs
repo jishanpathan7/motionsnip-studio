@@ -8,7 +8,10 @@
 //     "core": 1,               // the add-on API it was written for (ADDON_API)
 //     "server": "server.mjs",  // optional: export default async function setup(addon) { addon.route(...) }
 //     "app": "app.js",         // optional: export default async function start(host) { ... } in the player
-//     "requires": "pro"        // optional: the licence it needs; without that licence it stays locked
+//     "requires": "pro",       // optional: the licence it needs; without that licence it stays locked
+//     "released": "2026-12-01", // optional: its release date; a lapsed licence still runs versions released
+//                              // while it was paid for (lib/licence.mjs)
+//     "provides": { "presets": ["ui.terminal"] }  // optional: the timeline preset clips it draws
 //   }
 //
 // An add-on that can't load (a bad manifest, an older API, an error in setup) is reported and left out;
@@ -24,6 +27,7 @@ import { pathToFileURL } from 'node:url';
 export const ADDON_API = 1;
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const ROUTE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const PRESET = /^[a-z0-9][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,31}$/;
 const SETUP_MS = 5000;
 
 /** Where add-ons are looked for: MOTIONSNIP_ADDONS (a path list) or ~/.motionsnip/addons. */
@@ -57,6 +61,12 @@ export function checkManifest(m, dir) {
     if (!fs.existsSync(f) || !fs.statSync(f).isFile()) return `${k} file not found: ${m[k]}`;
   }
   if (m.requires !== undefined && (typeof m.requires !== 'string' || !ID.test(m.requires))) return 'requires must be a licence name';
+  if (m.released !== undefined && (typeof m.released !== 'string' || !/^\d{4}-\d\d-\d\d/.test(m.released) || !Number.isFinite(Date.parse(m.released)))) return 'released must be a date (YYYY-MM-DD)';
+  if (m.provides !== undefined) {
+    if (!m.provides || typeof m.provides !== 'object' || Array.isArray(m.provides)) return 'provides must be an object';
+    const p = m.provides.presets;
+    if (p !== undefined && (!Array.isArray(p) || p.length > 200 || !p.every((n) => typeof n === 'string' && PRESET.test(n)))) return 'provides.presets must be a list of preset names (like ui.terminal)';
+  }
   return null;
 }
 
@@ -97,14 +107,14 @@ const withTimeout = (p, ms, what) =>
 /**
  * Discover and start add-ons. Returns a Map id → add-on:
  *   { id, name, version, dir, state: 'on' | 'locked' | 'error', reason, app (file) | null, routes: Map('GET name' → handler) }
- * opts.entitled(name) says whether a licence is held (no licences exist yet, so by default nothing is).
+ * opts.entitled(name, { released }) says whether a licence for it is held (by default none is).
  * opts.helpers are handed to every server setup() as addon.helpers.
  */
 export async function loadAddons(dirs, { entitled = () => false, helpers = {}, log = () => {} } = {}) {
   const addons = new Map();
   for (const { dir, manifest: m, error } of discoverAddons(dirs)) {
     const id = path.basename(dir); // a good manifest's id is its folder's name
-    const a = { id, name: (m && typeof m.name === 'string' && m.name) || id, version: (m && typeof m.version === 'string' && m.version) || '', dir, state: 'error', reason: '', app: null, routes: new Map() };
+    const a = { id, name: (m && typeof m.name === 'string' && m.name) || id, version: (m && typeof m.version === 'string' && m.version) || '', dir, state: 'error', reason: '', app: null, routes: new Map(), presets: [] };
     if (addons.has(id)) {
       log(`Add-on ${id} in ${dir} skipped: an add-on with that id is already loaded from ${addons.get(id).dir}`);
       continue;
@@ -115,14 +125,16 @@ export async function loadAddons(dirs, { entitled = () => false, helpers = {}, l
       log(`Add-on ${id} not loaded: ${error}`);
       continue;
     }
-    if (m.requires && !entitled(m.requires)) {
+    if (m.requires && !entitled(m.requires, { released: m.released })) {
       a.state = 'locked';
       a.reason = `Needs a ${m.requires} licence`;
       continue;
     }
     if (m.server) {
       try {
-        const mod = await import(pathToFileURL(entryFile(dir, m.server)).href);
+        // ?t= the file's time: after an update in place, the new code loads, not the cached module
+        const file = entryFile(dir, m.server);
+        const mod = await import(`${pathToFileURL(file).href}?t=${Math.round(fs.statSync(file).mtimeMs)}`);
         if (typeof mod.default !== 'function') throw new Error(`${m.server} has no default export function`);
         const api = {
           id,
@@ -147,6 +159,7 @@ export async function loadAddons(dirs, { entitled = () => false, helpers = {}, l
       }
     }
     a.app = m.app ? entryFile(dir, m.app) : null;
+    a.presets = m.provides?.presets || [];
     a.state = 'on';
     log(`Add-on ${a.name} ${a.version} on`);
   }
@@ -161,6 +174,7 @@ export function addonList(addons) {
     version: a.version,
     state: a.state,
     ...(a.reason ? { reason: a.reason } : {}),
-    ...(a.state === 'on' && a.app ? { app: `/addons/${a.id}/${path.relative(a.dir, a.app).split(path.sep).join('/')}` } : {}),
+    ...(a.state === 'on' && a.app ? { app: `/addons/${a.id}/${path.relative(a.dir, a.app).split(path.sep).join('/')}?t=${Math.round(fs.statSync(a.app, { throwIfNoEntry: false })?.mtimeMs || 0)}` } : {}),
+    ...(a.state === 'on' && a.presets.length ? { presets: a.presets } : {}),
   }));
 }

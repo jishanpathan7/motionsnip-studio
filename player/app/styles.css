@@ -2042,6 +2042,19 @@ body.has-live .main-video {
   border-left: 3px solid var(--text-2);
   font-size: 13px;
 }
+.pro-dialog p {
+  margin: 0 0 10px;
+}
+.pro-dialog .input {
+  width: 100%;
+}
+.pro-dialog .hint {
+  white-space: normal;
+}
+.pro-dialog a.btn {
+  color: inherit;
+  text-decoration: none;
+}
 .warn-bad {
   color: var(--bad);
   border-left-color: var(--bad);

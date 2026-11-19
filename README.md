@@ -228,6 +228,7 @@ The key ideas:
 - "Show in Finder" works only for files inside the project.
 - If `reel.json` has an `export.cmd`, the render export runs that command on your machine, like an npm script. A `live` script (`live.js`) runs in the player page. Only open projects you trust, or start the server with `--safe`, which runs neither: the player shows the rendered video and says what was left out.
 - Add-ons in `~/.motionsnip/addons` run with the same rights as MotionSnip itself, like any program you install. Only install add-ons you trust. An add-on that needs a licence you don't hold stays locked: its code isn't loaded.
+- The Pro add-on is downloaded only after its Ed25519 signature and SHA-256 hash check out, and it is unpacked with no links and no paths outside its folder.
 
 ## Tests
 
@@ -235,7 +236,7 @@ The key ideas:
 node player/server.mjs --selftest
 ```
 
-It checks byte ranges, upload name cleaning, file type sniffing, the host and origin checks, the ffmpeg mix arguments and add-on loading, and runs a real upload against a temporary project. It prints `selftest ok`.
+It checks byte ranges, upload name cleaning, file type sniffing, the host and origin checks, the ffmpeg mix arguments, add-on loading and the Pro licence and package checks (against a fake licence server), and runs a real upload against a temporary project. It prints `selftest ok`.
 
 To measure how much CPU an export costs on your machine (needs Chrome or Chromium, and ffmpeg):
 
@@ -260,7 +261,16 @@ The server moves to the next free port and prints the address. Use `--port` to p
 ## FAQ
 
 **Does anything leave my machine?**
-Only one request: the player page loads its fonts from Google Fonts. Your video, music, edits and notes stay on your machine.
+No. The player's fonts come with it, and your video, music, edits and notes stay on your machine. The only exception is MotionSnip Pro, and only if you use it: activating a licence, refreshing it, and downloading the Pro add-on talk to `licence.motionsnip.com`, sending the licence key (or the licence) and a random ID for this computer. A licence that ends within 7 days is refreshed when the player starts; offline, Pro keeps working until the licence ends.
+
+**What is MotionSnip Pro?**
+A paid add-on with extra timeline presets (the first pack is a UI-demo kit: app and browser windows, a terminal, a code editor, a cursor, typing and notifications). Everything in this repository stays free and MIT. Activate a key with the **Pro** button in the header, or from a terminal:
+
+```bash
+node player/server.mjs --activate <licence-key>
+```
+
+That saves `~/.motionsnip/licence.json` and installs the add-on in `~/.motionsnip/addons/pro`. `--licence` shows its state and `--deactivate` frees the key for another computer. If the subscription ends, the Pro versions released while it ran keep working.
 
 **Where are my edits saved?**
 In your browser's storage and in `.motionsnip/state.json` in the project folder. Closing the tab doesn't lose them. Each round you send is kept as `.motionsnip/feedback-v<N>.md`. Exports go to `exports/` and are never overwritten.
@@ -282,7 +292,7 @@ Install it (`brew install ffmpeg` on macOS), or start the server with `--ffmpeg 
 ```
 SKILL.md              the Claude Code skill
 player/server.mjs     the local server (Node 18+, no dependencies)
-player/lib/           server modules: HTTP, files, media, the project store, jobs, cutdowns, frame and composed export, add-ons
+player/lib/           server modules: HTTP, files, media, the project store, jobs, cutdowns, frame and composed export, add-ons, the Pro licence
 player/bench/         the render benchmark (CPU per minute of exported video)
 player/index.html     the player page
 player/app/           the player's scripts and styles
