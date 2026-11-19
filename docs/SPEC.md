@@ -135,12 +135,24 @@ node player/server.mjs --selftest
   (append `-2`, `-3`…). Saves to `assets/`. Responds `{ id: "assets/<name>", name, type: "audio" | "image" | "video" }`.
 - `GET /api/formats` → which export formats this ffmpeg can make (`mp4`, `hevc`, `prores`, `webm`, `gif`).
 - Frame export (scene and timeline projects; the browser draws, ffmpeg encodes): `POST /api/frames-start`
-  `{ w, h, fps, frames, format, audio: [{ src, at, in, out, gain, fadeIn, fadeOut }], setSrc, captions, pix? }` → `{ job }`;
+  `{ w, h, fps, frames, format, audio: [{ src, at, in, out, gain, fadeIn, fadeOut }], setSrc, captions, pix?, compose? }`
+  → `{ job, composed }`;
   `POST /api/frames-push?job=` with PNGs back to back, or with `pix: "rgba"` raw RGBA frames (w×h×4 bytes each);
   `?repeat=n` sends the last frame again n times. `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
   time, abandoned after 20 s without frames. ffmpeg encodes the picture first, then mixes the audio clips under it in a
   second pass with the picture copied (clips with no sound track are skipped).
   `setSrc` makes the export the project's video; `captions` writes `<export>.srt` and `.vtt` from the timeline's captions.
+  The picture is converted with the BT.709 matrix and tagged BT.709, the way browsers play untagged video.
+  - Composed (timelines): `compose: { size, fps, bg, layers }` (from `app/comp/compose.mjs` `composeSpec`, raw frames
+    only). ffmpeg draws the layers (video clips and blur boxes) and lays the pushed frames on top; the player then draws
+    only the rest onto a transparent frame and never seeks a `<video>`. `composePlan` decides: every video clip has a
+    file and no wipe, blur boxes don't move or wipe, and nothing the player draws sits under an ffmpeg layer while both
+    are on screen. Otherwise every frame is drawn as before. The server normalises the layers again
+    (`lib/compose.mjs`), leaves out videos whose file is missing, answers 400 to anything it won't draw (the player
+    then draws every frame), and reads untagged video as BT.709. Each clip: its own input from its first frame, fitted
+    and coloured, moved, scaled and rotated by `perspective` (corners per frame from `clipState`, simplified to a
+    piecewise-straight expression), faded by `colorchannelmixer` alpha through `sendcmd`. A graph over 100 kB is passed
+    as a file (`-/filter_complex`).
 - `POST /api/project-apply` `{ file, base?, bump?, patches? | ops? | content? }` → writes `timeline.json`, `scene.json` or
   a scene file the timeline uses: `patches` `[{ path, value }]` only at editable paths, `ops` (timeline edit operations,
   `comp/ops.mjs`) or the whole `content`. `base` is the file's `rev` (short sha1 of its text) the edit started from; a

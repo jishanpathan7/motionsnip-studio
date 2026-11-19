@@ -36,7 +36,7 @@ export function availableFormats(have) {
 
 const n3 = (v) => String(Math.round(Number(v) * 1000) / 1000);
 
-function videoCodecArgs(format, encoder) {
+export function videoCodecArgs(format, encoder) {
   switch (encoder) {
     case 'libx264':
       return ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'];
@@ -58,6 +58,17 @@ function videoCodecArgs(format, encoder) {
     default:
       throw new Error(`No encoder for ${format}`);
   }
+}
+
+/**
+ * The browser's pixels are sRGB and players read untagged video as BT.709, so the picture is converted with the
+ * BT.709 matrix (limited range) and tagged as such. Without this, ffmpeg converts with BT.601 and colours shift
+ * (#ff4fa3 played back as #ff65a4). Returns { vf: filters ending in the encoder's pixel format, tags: output args }.
+ */
+export function bt709Out(format, encoder) {
+  const a = videoCodecArgs(format, encoder);
+  const pix = a[a.indexOf('-pix_fmt') + 1];
+  return { vf: `scale=out_color_matrix=bt709:out_range=tv,format=${pix}`, tags: ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'] };
 }
 
 function audioCodecArgs(kind) {
@@ -114,7 +125,8 @@ export function buildFramesArgs(opts) {
     args.push('-filter_complex', `[0:v]fps=${gf},scale=${gw}:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4[v]`, '-map', '[v]', '-loop', '0', '-t', n3(D), out);
     return args;
   }
-  args.push('-vf', `format=rgba,scale=${w}:${h},setsar=1`, ...videoCodecArgs(format, encoder), '-r', String(fps), '-an', '-t', n3(D), out);
+  const c = bt709Out(format, encoder);
+  args.push('-vf', `format=rgba,scale=${w}:${h},setsar=1,${c.vf}`, ...videoCodecArgs(format, encoder), ...c.tags, '-r', String(fps), '-an', '-t', n3(D), out);
   return args;
 }
 

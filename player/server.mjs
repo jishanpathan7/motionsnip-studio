@@ -29,6 +29,7 @@ import { toReel as timelineToReel, applyPatches as applyTimelinePatches, normTim
 import { applyOps } from './app/comp/ops.mjs';
 import { loadAddons, addonList, defaultAddonDirs } from './lib/addons.mjs';
 import { FORMATS, encoderSet, pickEncoder, availableFormats, audioMix, buildFramesArgs, buildMuxArgs, countPngs } from './lib/frames.mjs';
+import { normComposeSpec, buildComposeArgs } from './lib/compose.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../player
 const ROOT = path.dirname(HERE); // the repo / skill folder
@@ -256,8 +257,10 @@ export function parseProbe(stderr) {
   const duration = d ? Number(d[1]) * 3600 + Number(d[2]) * 60 + Number(d[3]) : null;
   const hasAudio = /Stream #\d+:\d+[^\n]*: Audio:/.test(text);
   const video = /Stream #\d+:\d+[^\n]*: Video:[^\n]*/.exec(text);
-  const out = { duration, hasAudio, hasVideo: !!video, w: null, h: null, fps: null };
+  const out = { duration, hasAudio, hasVideo: !!video, w: null, h: null, fps: null, matrix: null };
   if (video) {
+    const m = /\((?:tv|pc), (bt709|smpte170m|bt470bg|bt2020nc|bt2020c|smpte240m|fcc|ycgco|gbr)\b/.exec(video[0]);
+    if (m) out.matrix = m[1];
     const wh = /, (\d{2,5})x(\d{2,5})/.exec(video[0]);
     const f = /([\d.]+) fps/.exec(video[0]) || /([\d.]+) tbr/.exec(video[0]);
     if (wh) {
@@ -1515,7 +1518,33 @@ async function apiFramesStart(ctx, req, res) {
   // with sound, the frames become a picture-only file first and the sound is added in a second pass (see buildMuxArgs)
   const withSound = !!buildMuxArgs({ video: out, out, format, duration: frames / fps, audio });
   const picture = withSound ? out.replace(/(\.\w+)$/, '.picture$1') : out;
-  const args = buildFramesArgs({ fps, w, h, frames, out: picture, format, encoder, raw });
+  // composed: ffmpeg draws the timeline's video clips and blur boxes, the frames go on top (lib/compose.mjs)
+  let comp = null;
+  if (body.compose) {
+    if (!raw) throw httpError(400, 'A composed export needs raw frames');
+    try {
+      comp = normComposeSpec(body.compose, (src) => {
+        const f = typeof src === 'string' ? resolveInside(ctx.dir, src) : null;
+        return f && isFile(f) ? f : null;
+      });
+    } catch (e) {
+      throw httpError(400, e.message);
+    }
+  }
+  let args;
+  let graphFile = null;
+  if (comp) {
+    for (const L of comp.layers) if (L.kind === 'video') L.untagged = !(await probe(ff, L.file).catch(() => ({}))).matrix;
+    const built = buildComposeArgs({ fps, w, h, frames, out: picture, format, encoder, ...comp, look: lookFilter });
+    args = built.args;
+    // a long graph (many keyframes) goes in a file: command lines have a length limit
+    if (built.graph.length > 100_000) {
+      graphFile = path.join(os.tmpdir(), `motionsnip-graph-${crypto.randomBytes(6).toString('hex')}.txt`);
+      fs.writeFileSync(graphFile, built.graph);
+      const i = args.indexOf('-filter_complex');
+      args.splice(i, 2, '-/filter_complex', graphFile);
+    }
+  } else args = buildFramesArgs({ fps, w, h, frames, out: picture, format, encoder, raw });
   const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['pipe', 'pipe', 'pipe'] });
   const id = crypto.randomBytes(6).toString('hex');
   const job = { id, child, total: frames, got: 0, last: Date.now(), out, picture, audio, duration: frames / fps, rel, format, frameBytes: raw ? w * h * 4 : 0, lastFrame: null, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif', captions: !!body.captions && !!reel.timeline };
@@ -1530,13 +1559,14 @@ async function apiFramesStart(ctx, req, res) {
     });
     child.on('close', (code) => {
       if (code !== 0 && !job.failed) job.failed = lastLine(errText) || `ffmpeg exited with code ${code}`;
+      if (graphFile) fs.rmSync(graphFile, { force: true });
       resolve();
     });
   });
   ctx.frames = job;
   ctx.child = child;
   ctx.job = { state: 'running', pct: 0, line: `Drawing frames (0/${frames})…`, out, rel, mode: 'frames' };
-  return sendJson(res, 200, { job: id, format, encoder, w, h, fps, frames, rel });
+  return sendJson(res, 200, { job: id, format, encoder, w, h, fps, frames, rel, composed: !!comp });
 }
 
 function framesJob(ctx, url) {
@@ -2101,7 +2131,8 @@ async function selftest() {
     const probeText = `Input #0, mov,mp4: Duration: 00:01:02.50, start: 0.000000, bitrate: 100 kb/s
   Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1280x720, 30 fps
   Stream #0:1[0x2](und): Audio: aac (LC), 48000 Hz, stereo`;
-    assert.deepEqual(parseProbe(probeText), { duration: 62.5, hasAudio: true, hasVideo: true, w: 1280, h: 720, fps: 30 });
+    assert.deepEqual(parseProbe(probeText), { duration: 62.5, hasAudio: true, hasVideo: true, w: 1280, h: 720, fps: 30, matrix: null });
+    assert.equal(parseProbe('Duration: 00:00:01.00\n  Stream #0:0: Video: h264 (High), yuv420p(tv, bt709, progressive), 1920x1080, 30 fps').matrix, 'bt709', 'a tagged colour matrix');
     assert.equal(parseProbe('Duration: 00:00:10.00\n Stream #0:0: Video: h264').hasAudio, false);
     const upright = 'Duration: 00:00:05.00\n  Stream #0:0: Video: hevc, yuv420p, 1920x1080, 29.97 fps\n    side data:\n      displaymatrix: rotation of -90.00 degrees';
     assert.deepEqual([parseProbe(upright).w, parseProbe(upright).h, parseProbe(upright).fps], [1080, 1920, 29.97]);
@@ -2122,7 +2153,8 @@ async function selftest() {
       assert.deepEqual(availableFormats(have), { mp4: 'libx264', gif: 'gif' });
       assert.equal(pickEncoder('webm', have), null);
       const a = buildFramesArgs({ fps: 30, w: 1280, h: 720, frames: 90, out: 'o.mp4', format: 'mp4', encoder: 'libx264' });
-      assert.equal(a[a.indexOf('-vf') + 1], 'format=rgba,scale=1280:720,setsar=1');
+      assert.equal(a[a.indexOf('-vf') + 1], 'format=rgba,scale=1280:720,setsar=1,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p', 'converted with BT.709');
+      assert.equal(a[a.indexOf('-colorspace') + 1], 'bt709', 'and tagged');
       assert.ok(a.includes('-an') && a.filter((x) => x === '-i').length === 1, 'the picture pass reads only the frames');
       assert.deepEqual(a.slice(a.indexOf('image2pipe') - 1, a.indexOf('image2pipe') + 7), ['-f', 'image2pipe', '-framerate', '30', '-c:v', 'png', '-i', 'pipe:0']);
       const mux = buildMuxArgs({ video: 'p.mp4', out: 'o.mp4', format: 'mp4', duration: 3, audio: [{ file: 'm.mp3', at: 0.5, in: 2, gain: 0.8, fadeOut: 1 }, { file: 'late.mp3', at: 5 }] });
@@ -2717,6 +2749,49 @@ async function selftest() {
       assert.ok(T.toVtt(cues).startsWith('WEBVTT\n\n00:00:00.200 --> 00:00:02.200\nOne\n'));
       assert.equal(T.toSrt(T.captionCues(T.normTimeline({ tracks: [{ kind: 'captions', clips: [{ at: 3725.5, dur: 1, text: 'x' }] }] }))).split('\n')[1], '01:02:05,500 --> 01:02:06,500');
 
+      // composed export: what ffmpeg draws, what stops it, and the graph it gets
+      {
+        const CP = await import('./app/comp/compose.mjs');
+        const CL = await import('./lib/compose.mjs');
+        const mk = (tracks) => T.normTimeline({ size: [1920, 1080], fps: 30, tracks });
+        const vid = (extra = {}) => ({ kind: 'video', clips: [{ id: 'v', src: 'a.mp4', at: 0, in: 0, out: 4, ...extra }] });
+        const txt = (extra = {}) => ({ kind: 'graphics', clips: [{ id: 't', type: 'text', text: 'Hi', at: 1, dur: 2, ...extra }] });
+        let p = CP.composePlan(mk([vid(), txt()]));
+        assert.ok(p.ok && p.ids.has('v') && !p.ids.has('t'), 'video under text: composed');
+        assert.equal(CP.composePlan(mk([txt()])).ok, false, 'no video: nothing to compose');
+        assert.match(CP.composePlan(mk([txt(), vid()])).reason, /under a video/, 'text under a video: not composed');
+        assert.ok(CP.composePlan(mk([txt({ at: 5 }), vid()])).ok, 'text under a video at another time: composed');
+        assert.ok(CP.composePlan(mk([{ ...txt(), hide: true }, vid()])).ok, 'a hidden track is left out');
+        assert.match(CP.composePlan(mk([vid({ enter: { kind: 'wipe', dur: 1 } })])).reason, /wipe/);
+        assert.ok(CP.composePlan(mk([vid({ enter: { kind: 'zoom', dur: 1 }, keys: { scale: [[0, 1], [4, 1.2, 'inOut']], x: [[0, 0], [2, 10]] } })])).ok, 'zoom, scale and moves are composed');
+        const blur = (extra = {}) => ({ kind: 'graphics', clips: [{ id: 'b', type: 'blur', at: 0, dur: 2, box: [10, 10, 20, 20], ...extra }] });
+        p = CP.composePlan(mk([vid(), blur()]));
+        assert.ok(p.ok && p.ids.has('b'), 'a blur box over video: composed');
+        assert.match(CP.composePlan(mk([vid(), blur({ keys: { x: [[0, 0], [1, 5]] } })])).reason, /blur box moves/);
+        assert.match(CP.composePlan(mk([vid(), txt({ at: 0 }), blur()])).reason, /under a blur box/, 'text under a blur box: not composed');
+        const spec = CP.composeSpec(mk([vid({ look: { saturation: 0.5 } }), blur()]), CP.composePlan(mk([vid({ look: { saturation: 0.5 } }), blur()])));
+        const n = CL.normComposeSpec(JSON.parse(JSON.stringify(spec)), (s) => `/p/${s}`);
+        assert.equal(n.layers.length, 2);
+        assert.equal(n.layers[0].file, '/p/a.mp4');
+        assert.equal(CL.normComposeSpec(spec, () => null).layers.length, 1, 'a missing video is left out');
+        assert.throws(() => CL.normComposeSpec({ layers: [{ kind: 'video', src: 'a.mp4', at: 0, dur: 1, enter: { kind: 'wipe', dur: 0.5 } }] }, (s) => s), /wipe/);
+        const { args, graph } = CL.buildComposeArgs({ w: 1920, h: 1080, fps: 30, frames: 120, out: 'o.mp4', format: 'mp4', encoder: 'libx264', ...n, look: lookFilter });
+        assert.ok(args.includes('pipe:0') && args.includes('/p/a.mp4'));
+        assert.match(graph, /colorchannelmixer=rr=/, 'the look');
+        assert.match(graph, /gblur=sigma=/, 'the blur box');
+        assert.doesNotMatch(graph, /perspective/, 'a still full-frame clip needs no transform');
+        assert.match(graph, /\[b2\]\[0:v\]overlay=0:0/, 'the browser layer goes on top');
+        assert.equal(CL.ffColor('#abc'), '0xaabbcc');
+        assert.equal(CL.ffColor('#11223344'), '0x112233');
+        assert.deepEqual(CL.simplify([[0, 0], [1, 1], [2, 2], [3, 5]], 0.01), [[0, 0], [2, 2], [3, 5]]);
+        assert.equal(CL.pwlExpr([[0, 2], [10, 2]]), '2');
+        assert.equal(CL.pwlExpr([[0, 0], [10, 5]]), 'if(lt(in,0),0,if(lt(in,10),0+(5)*(in-0)/10,5))');
+        assert.deepEqual(CL.cornersFor(100, 50, 50, 25, 0, 0, 0, 1), [0, 0, 100, 0, 0, 50, 100, 50]);
+        const z = CL.cornersFor(100, 50, 50, 25, 0, 0, 0, 2);
+        assert.deepEqual(z, [25, 12.5, 75, 12.5, 25, 37.5, 75, 37.5], 'scale 2 shows the middle half');
+        assert.deepEqual(CL.clipFrames({ at: 1.05, end: 2.05 }, 10, 30), [11, 21]);
+      }
+
       // graphics: presets settle, a scene cut hides the scene's own transition, CSS matches the canvas transform
       const G = await import('./app/comp/graphics.mjs');
       const popEnd = G.presetAt({ preset: 'pop', dur: 3 }, 1, 1080);
@@ -2962,6 +3037,34 @@ async function selftest() {
         assert.equal(fs.readdirSync(path.join(fd, 'exports')).filter((f) => f.endsWith('.gif')).length, 0);
         r = await request(fs2.port, 'POST', `/api/frames-push?job=${gj}`, { body: pngs[0], headers: post });
         assert.ok(r.status >= 400, 'a finished job takes no more frames');
+        // composed: ffmpeg draws a video clip (fading in) under transparent frames, on the timeline's clock
+        const red = await run(realFf.path, ['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'color=c=red:s=64x36:r=10:d=2', '-pix_fmt', 'yuv420p', path.join(fd, 'red.mp4')], { env });
+        assert.equal(red.code, 0, 'make test clip');
+        const spec = { size: [64, 36], fps: 10, bg: '#0000ff', layers: [{ kind: 'video', src: 'red.mp4', at: 1.05, dur: 1, in: 0, out: 1, enter: { kind: 'fade', dur: 0.3 } }] };
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 30, compose: spec });
+        assert.equal(r.status, 400, 'composed exports take raw frames');
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 30, pix: 'rgba', compose: { ...spec, layers: [{ ...spec.layers[0], enter: { kind: 'wipe', dur: 0.3 } }] } });
+        assert.equal(r.status, 400, "a wipe on a video clip isn't composed");
+        assert.match(r.json.error, /wipe/);
+        r = await begin({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 30, pix: 'rgba', compose: spec });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        assert.equal(r.json.composed, true);
+        const cj = r.json.job;
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${cj}`, { body: rawFrame(0), headers: post });
+        r = await request(fs2.port, 'POST', `/api/frames-push?job=${cj}&repeat=29`, { body: '', headers: post });
+        assert.equal(r.json.got, 30);
+        r = await request(fs2.port, 'POST', `/api/frames-end?job=${cj}`, { body: '{}', headers: post });
+        assert.equal(r.json.state, 'done', r.json.line);
+        const px = await run(realFf.path, ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-i', path.join(fd, r.json.rel), '-vf', 'format=rgb24,crop=2:2:30:16,scale=1:1', '-f', 'rawvideo', path.join(fd, 'px.rgb')], { env });
+        assert.equal(px.code, 0, px.stderr);
+        const rgb = fs.readFileSync(path.join(fd, 'px.rgb'));
+        const at = (i) => [rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]];
+        assert.equal(rgb.length, 90, 'thirty frames');
+        assert.ok(at(10)[2] > 200 && at(10)[0] < 30, `before the clip: the background (${at(10)})`);
+        assert.ok(at(11)[0] > 80 && at(11)[0] < 130, `the fade's first frame: about 42% (${at(11)})`);
+        assert.ok(at(15)[0] > 240 && at(15)[2] < 20, `the clip (${at(15)})`);
+        assert.ok(at(21)[2] > 200 && at(21)[0] < 30, `after the clip: the background again (${at(21)})`);
+        assert.equal((await probe(realFf, path.join(fd, r.json.rel))).matrix, 'bt709', 'exports are tagged BT.709');
       } finally {
         await fs2.close();
       }

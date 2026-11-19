@@ -315,14 +315,16 @@ async function startFrames() {
   const shown = live.raw;
   const hidden = caps && !ex.opt.burn && shown ? { ...shown, tracks: shown.tracks.map((t) => (t?.kind === 'captions' ? { ...t, hide: true } : t)) } : null;
   if (hidden) live.load(hidden);
+  // a timeline whose video ffmpeg can draw: the browser draws only what goes on top (much faster, no seeking)
+  const comp = typeof live.composeSpec === 'function' ? live.composeSpec() : null;
   ex.abort = new AbortController();
   ex.job = { state: 'running', pct: 0, line: 'Starting…' };
   render();
   updateButton();
-  try {
-    ex.job = await exportFrames(
+  const run = (composed) =>
+    exportFrames(
       async (i, t, r) => {
-        if (typeof live.renderFrame === 'function') return live.renderFrame(r, t);
+        if (typeof live.renderFrame === 'function') return live.renderFrame(r, t, composed ? { skip: comp.ids } : {});
         r.clear();
         await r.drawSVG(live.frameAt(t));
       },
@@ -333,6 +335,7 @@ async function startFrames() {
         frames,
         format: ex.opt.format,
         audio,
+        compose: composed ? comp.spec : null,
         // the video becomes the project's src only when it shows everything the project shows
         setSrc: ex.opt.format !== 'gif' && size.id === 'native' && fps === reel.fps && (!caps || ex.opt.burn),
         captions: caps && ex.opt.sidecar,
@@ -346,6 +349,15 @@ async function startFrames() {
         },
       },
     );
+  try {
+    try {
+      ex.job = await run(!!comp?.ok);
+    } catch (e) {
+      // the server can't compose it (an older server, or a clip it won't draw): draw every frame instead
+      if (!comp?.ok || e.status !== 400 || e.message === 'Cancelled') throw e;
+      console.warn('[motionsnip] composed export refused, drawing every frame:', e.message);
+      ex.job = await run(false);
+    }
     if (ex.job.state === 'done') toast(`Export saved: ${ex.job.rel}`);
     else if (ex.job.state === 'error') toast(`Export failed: ${ex.job.line || ''}`, { kind: 'error', ms: 6000 });
   } catch (e) {

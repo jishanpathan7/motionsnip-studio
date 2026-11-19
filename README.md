@@ -127,7 +127,7 @@ For a whole video (footage, illustrated scenes, titles, music and captions toget
 - **Undo and redo** everything. Every edit is saved into `timeline.json` at once, so Claude works on exactly what you see; if Claude changes the file while you watch, the editor picks it up.
 - **Start from a plain video.** Open any video, trim and cut it, put words, a logo or a blur on it, then **Open in timeline** (in the Edit tab): your edits become clips in `timeline.json` next to the video, and the video file stays as it is.
 - **Ask for something new** in the Changes tab ("a 20 s teaser: a stuck developer, then our app saves the day, with captions"): it goes to Claude with Send.
-- **Export** with sound to MP4, HEVC, ProRes, WebM or GIF at 720p to 4K and 24 to 60 fps, captions drawn in or saved as `.srt` and `.vtt`. Make 9:16, 1:1 and bumper versions from it with Cutdown.
+- **Export** with sound to MP4, HEVC, ProRes, WebM or GIF at 720p to 4K and 24 to 60 fps, captions drawn in or saved as `.srt` and `.vtt`. Make 9:16, 1:1 and bumper versions from it with Cutdown. When it can, ffmpeg draws the footage and the page draws only what goes on top, which is about twice as fast; a timeline with something it can't split that way (a wipe on footage, a graphic under footage, a moving blur box) is drawn frame by frame as before.
 
 ```bash
 node player/server.mjs examples/timeline-demo
@@ -282,7 +282,7 @@ Install it (`brew install ffmpeg` on macOS), or start the server with `--ffmpeg 
 ```
 SKILL.md              the Claude Code skill
 player/server.mjs     the local server (Node 18+, no dependencies)
-player/lib/           server helpers (cutdowns, frame export, add-ons)
+player/lib/           server helpers (cutdowns, frame export, composed timeline export, add-ons)
 player/bench/         the render benchmark (CPU per minute of exported video)
 player/index.html     the player page
 player/app/           the player's scripts and styles
