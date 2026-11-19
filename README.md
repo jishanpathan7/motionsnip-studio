@@ -282,7 +282,7 @@ Install it (`brew install ffmpeg` on macOS), or start the server with `--ffmpeg 
 ```
 SKILL.md              the Claude Code skill
 player/server.mjs     the local server (Node 18+, no dependencies)
-player/lib/           server helpers (cutdowns, frame export, composed timeline export, add-ons)
+player/lib/           server modules: HTTP, files, media, the project store, jobs, cutdowns, frame and composed export, add-ons
 player/bench/         the render benchmark (CPU per minute of exported video)
 player/index.html     the player page
 player/app/           the player's scripts and styles

@@ -112,6 +112,13 @@ node player/server.mjs <project-dir> [--port 4321] [--no-open] [--ffmpeg /path/t
 node player/server.mjs --selftest
 ```
 
+- Structure: `server.mjs` holds the routes; its helpers live in `player/lib/` (`http.mjs`, `files.mjs`, `media.mjs`,
+  `frames.mjs`, `compose.mjs`, `cutdown.mjs`, `addons.mjs`). Two seams keep the routes independent of this computer:
+  - **ProjectStore** (`lib/store.mjs`): every read and write of the project's own files goes through `ctx.store`
+    (project-relative paths; atomic writes; nothing outside the project). `localStore(dir)` is the folder;
+    `startServer({ store })` takes another. Engines that need a real path (ffmpeg, `export.cmd`) ask `store.path()`.
+  - **JobRunner** (`lib/jobs.mjs`): the export and the cutdown each run in a lane (one task at a time) that holds
+    the status `GET /api/export` and `GET /api/cutdown` return; `runTracked` turns ffmpeg's `-progress` into `pct`.
 - `--safe` (`startServer({ projectCode: false })`): code from the project folder never runs.
   - `GET /api/reel` leaves out `export.cmd`/`export.cwd` and a script `live`, and lists what it left out in
     `codeOff: ['export.cmd', 'live']`. The player says so once.
@@ -126,7 +133,8 @@ node player/server.mjs --selftest
 - `GET /p/<path>` → a file inside the project folder (resolved, must stay inside; 403 otherwise). If missing and
   `public/<path>` exists, serve that. Byte-range support (206, 416) for video/audio seeking. `Cache-Control: no-store`.
   Content types for html/js/css/json/mp4/webm/mov/mp3/wav/m4a/aac/ogg/png/jpg/webp/gif/svg.
-- `GET /api/reel` → reel.json (parsed and re-serialised; 500 with a short message if invalid).
+- `GET /api/reel` → reel.json (parsed and re-serialised; 500 with a short message if invalid). It carries an `ETag`;
+  a request with a matching `If-None-Match` gets `304` and no body, so the player's poll only parses a change.
 - `GET /api/state` / `POST /api/state` (JSON body ≤ 2 MB) → read/write `.motionsnip/state.json`.
 - `POST /api/upload?name=<file name>` (raw body) → audio (mp3/wav/m4a), images (png/jpg/webp/svg) and video
   (mp4/mov/webm, ≤ 4 GB, streamed to disk); first bytes must match the type
@@ -196,7 +204,7 @@ node player/server.mjs --selftest
 
 ## 4. Player (browser; plain ES modules + CSS, no framework, no build)
 
-Files under `player/app/`. Loads `/api/reel`, polls it every 2 s for a new `version`.
+Files under `player/app/`. Loads `/api/reel`, polls it every 2 s (with `If-None-Match`) for a new `version`.
 
 ### Layout
 Header: logo (cue-mark symbol + "MotionSnip Studio"), project title and version, approval counter ("6 of 9 approved",
