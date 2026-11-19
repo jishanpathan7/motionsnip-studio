@@ -7,6 +7,7 @@
 import { normTimeline, evalAt, setPath as tlSetPath, VISUAL } from './timeline.mjs';
 import { setPath as sceneSetPath } from '../scene/compile.mjs';
 import { frameSVG } from '../scene/draw.mjs';
+import { composePlan, composeSpec } from './compose.mjs';
 import { drawGraphic, rectOf, cssFor, lookSvg, drawFit, applyLookPixels, withTransform } from './graphics.mjs';
 
 const SCENE_FONT = '/app/fonts/fonts.css'; // Patrick Hand, served with the player
@@ -386,14 +387,19 @@ export function createTimeline(host, raw, opts = {}) {
     return img(src);
   }
 
-  /** Draw time t onto raster (createRaster from raster.js), at the raster's size. */
-  async function renderFrame(raster, at) {
+  /**
+   * Draw time t onto raster (createRaster from raster.js), at the raster's size. opts.skip: clip ids ffmpeg draws in
+   * a composed export; with it the frame starts transparent and those clips are left out.
+   */
+  async function renderFrame(raster, at, opts = {}) {
     const { canvas, ctx: g } = raster;
     const sx = canvas.width / W();
     const sy = canvas.height / H();
-    raster.clear(tl.bg);
+    const skip = opts.skip || null;
+    raster.clear(skip ? null : tl.bg);
     const { layers } = evalAt(tl, at);
     for (const L of layers) {
+      if (skip?.has(L.clip.id)) continue;
       g.setTransform(sx, 0, 0, sy, 0, 0);
       const k = L.track.kind;
       const rect = rectOf(L.clip, W(), H(), k);
@@ -486,6 +492,11 @@ export function createTimeline(host, raw, opts = {}) {
     },
     renderFrame,
     exportAudio,
+    /** A composed export (ffmpeg draws the video and blur boxes): { ok, spec, ids } or { ok: false, reason }. */
+    composeSpec() {
+      const plan = composePlan(tl);
+      return plan.ok ? { ok: true, spec: composeSpec(tl, plan), ids: plan.ids } : plan;
+    },
     audio: true,
     destroy() {
       dead = true;

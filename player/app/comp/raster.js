@@ -131,7 +131,8 @@ export function createRaster(w, h) {
  * Stream frames to the server: start → push batches → end. draw(i, t, raster) paints frame i.
  * Frames go as raw RGBA (reading pixels takes milliseconds; encoding a PNG took most of a second at 1080p),
  * and a frame identical to the one before is sent as a repeat, so still stretches cost no upload.
- * opts: { w, h, fps, frames, format, audio, tag, setSrc, captions, onProgress(i, n), signal }. Resolves to the final job.
+ * opts: { w, h, fps, frames, format, audio, tag, setSrc, captions, compose, onProgress(i, n), signal }. compose: a
+ * composeSpec, when ffmpeg draws the video under these frames. Resolves to the final job.
  */
 export async function exportFrames(draw, opts) {
   const post = async (url, body, json = true) => {
@@ -142,7 +143,7 @@ export async function exportFrames(draw, opts) {
   };
   const start = await post(
     '/api/frames-start',
-    JSON.stringify({ w: opts.w, h: opts.h, fps: opts.fps, frames: opts.frames, format: opts.format, audio: opts.audio || [], tag: opts.tag, setSrc: opts.setSrc, captions: !!opts.captions, pix: 'rgba' }),
+    JSON.stringify({ w: opts.w, h: opts.h, fps: opts.fps, frames: opts.frames, format: opts.format, audio: opts.audio || [], tag: opts.tag, setSrc: opts.setSrc, captions: !!opts.captions, pix: 'rgba', compose: opts.compose || undefined }),
   );
   const job = start.job;
   const raster = createRaster(start.w, start.h);
