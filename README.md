@@ -264,7 +264,7 @@ The server moves to the next free port and prints the address. Use `--port` to p
 No. The player's fonts come with it, and your video, music, edits and notes stay on your machine. The only exception is MotionSnip Pro, and only if you use it: activating a licence, refreshing it, and downloading the Pro add-on talk to `licence.motionsnip.com`, sending the licence key (or the licence) and a random ID for this computer. A licence that ends within 7 days is refreshed when the player starts; offline, Pro keeps working until the licence ends.
 
 **What is MotionSnip Pro?**
-A paid add-on with extra timeline presets (the first pack is a UI-demo kit: app and browser windows, a terminal, a code editor, a cursor, typing and notifications). Everything in this repository stays free and MIT. Activate a key with the **Pro** button in the header, or from a terminal:
+A paid add-on with extra timeline clips (the first pack is a UI-demo kit: app and browser windows, a terminal, a code editor, a cursor, typing and notifications). Everything in this repository stays free and MIT. Activate a key with the **Pro** button in the header, or from a terminal:
 
 ```bash
 node player/server.mjs --activate <licence-key>

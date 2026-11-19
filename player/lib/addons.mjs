@@ -11,7 +11,7 @@
 //     "requires": "pro",       // optional: the licence it needs; without that licence it stays locked
 //     "released": "2026-12-01", // optional: its release date; a lapsed licence still runs versions released
 //                              // while it was paid for (lib/licence.mjs)
-//     "provides": { "presets": ["ui.terminal"] }  // optional: the timeline preset clips it draws
+//     "provides": { "kits": ["ui.terminal"] }  // optional: the timeline kit clips it draws ({ type: "kit" })
 //   }
 //
 // An add-on that can't load (a bad manifest, an older API, an error in setup) is reported and left out;
@@ -27,7 +27,7 @@ import { pathToFileURL } from 'node:url';
 export const ADDON_API = 1;
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const ROUTE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-export const PRESET = /^[a-z0-9][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,31}$/;
+export const KIT = /^[a-z0-9][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,31}$/;
 const SETUP_MS = 5000;
 
 /** Where add-ons are looked for: MOTIONSNIP_ADDONS (a path list) or ~/.motionsnip/addons. */
@@ -64,8 +64,8 @@ export function checkManifest(m, dir) {
   if (m.released !== undefined && (typeof m.released !== 'string' || !/^\d{4}-\d\d-\d\d/.test(m.released) || !Number.isFinite(Date.parse(m.released)))) return 'released must be a date (YYYY-MM-DD)';
   if (m.provides !== undefined) {
     if (!m.provides || typeof m.provides !== 'object' || Array.isArray(m.provides)) return 'provides must be an object';
-    const p = m.provides.presets;
-    if (p !== undefined && (!Array.isArray(p) || p.length > 200 || !p.every((n) => typeof n === 'string' && PRESET.test(n)))) return 'provides.presets must be a list of preset names (like ui.terminal)';
+    const k = m.provides.kits;
+    if (k !== undefined && (!Array.isArray(k) || k.length > 200 || !k.every((n) => typeof n === 'string' && KIT.test(n)))) return 'provides.kits must be a list of kit names (like ui.terminal)';
   }
   return null;
 }
@@ -114,7 +114,7 @@ export async function loadAddons(dirs, { entitled = () => false, helpers = {}, l
   const addons = new Map();
   for (const { dir, manifest: m, error } of discoverAddons(dirs)) {
     const id = path.basename(dir); // a good manifest's id is its folder's name
-    const a = { id, name: (m && typeof m.name === 'string' && m.name) || id, version: (m && typeof m.version === 'string' && m.version) || '', dir, state: 'error', reason: '', app: null, routes: new Map(), presets: [] };
+    const a = { id, name: (m && typeof m.name === 'string' && m.name) || id, version: (m && typeof m.version === 'string' && m.version) || '', dir, state: 'error', reason: '', app: null, routes: new Map(), kits: [] };
     if (addons.has(id)) {
       log(`Add-on ${id} in ${dir} skipped: an add-on with that id is already loaded from ${addons.get(id).dir}`);
       continue;
@@ -159,7 +159,7 @@ export async function loadAddons(dirs, { entitled = () => false, helpers = {}, l
       }
     }
     a.app = m.app ? entryFile(dir, m.app) : null;
-    a.presets = m.provides?.presets || [];
+    a.kits = m.provides?.kits || [];
     a.state = 'on';
     log(`Add-on ${a.name} ${a.version} on`);
   }
@@ -175,6 +175,6 @@ export function addonList(addons) {
     state: a.state,
     ...(a.reason ? { reason: a.reason } : {}),
     ...(a.state === 'on' && a.app ? { app: `/addons/${a.id}/${path.relative(a.dir, a.app).split(path.sep).join('/')}?t=${Math.round(fs.statSync(a.app, { throwIfNoEntry: false })?.mtimeMs || 0)}` } : {}),
-    ...(a.state === 'on' && a.presets.length ? { presets: a.presets } : {}),
+    ...(a.state === 'on' && a.kits.length ? { kits: a.kits } : {}),
   }));
 }

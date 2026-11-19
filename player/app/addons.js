@@ -5,11 +5,14 @@
 //     host.addHeaderButton({ label: 'Hello', icon: 'send', title: 'Say hello', onClick: async () => host.toast((await host.api('hello')).text) });
 //   }
 //
-// host: { id, name, version, store, bus, h, icon, toast, api(name, opts), url(file), addHeaderButton({ label, icon, title, onClick }) }
+// host: { id, name, version, store, bus, h, icon, toast, api(name, opts), url(file), addHeaderButton({ label, icon, title, onClick }),
+//         registerKit(name, def), addToolButton({ label, icon, title, onClick }), addKitClip(clip) }
 // store and bus are the player's own; an add-on reads them and listens, and changes the project through the API.
 
 import { store, bus } from './state.js';
 import { api, h, icon, toast } from './util.js';
+import { registerKit } from './comp/graphics.mjs';
+import { addToolButton, addKitClip } from './tracks.js';
 
 export const addons = { list: [] };
 
@@ -58,5 +61,20 @@ function hostFor(a, anchor) {
       anchor.before(b);
       return b;
     },
+    /**
+     * Draw timeline kit clips named `name` ({ type: 'kit', kit: name, params }). The name must be listed in the
+     * add-on's addon.json provides.kits. def: { label, draw(g, { params, u, dur, w, h, W, H, img, clip }) }.
+     */
+    registerKit(name, def) {
+      if (!(a.kits || []).includes(name)) throw new Error(`registerKit: ${name} isn't in provides.kits of ${a.id}'s addon.json`);
+      registerKit(name, def);
+    },
+    /** A button in the timeline toolbar's add group (timeline projects). */
+    addToolButton({ label, icon: ic, title, onClick }) {
+      if (typeof onClick !== 'function') throw new Error('addToolButton needs an onClick function');
+      addToolButton({ label, icon: ic, title, onClick });
+    },
+    /** Add a kit clip at the playhead: { kit, params, dur?, box? }. False when the project isn't a timeline. */
+    addKitClip: (clip) => addKitClip(clip),
   };
 }

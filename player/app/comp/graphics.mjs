@@ -172,6 +172,40 @@ function drawText(g, clip, u, w, h, H) {
   g.restore();
 }
 
+// Kit clips ({ type: 'kit', kit: 'ui.terminal', params }) are drawn by add-ons (addons.js host.registerKit). A kit
+// nobody registered draws nothing: the timeline's check says which add-on it needs.
+const KITS = new Map();
+const kitFailed = new Set();
+
+/**
+ * Register what draws a kit. def: { label, draw(g, { params, u, dur, w, h, W, H, img, clip }) }, drawing into a
+ * w×h box at the origin (the clip's box, already moved, scaled and faded). u is seconds into the clip.
+ * Drawing must depend only on its arguments, so the preview and the export match.
+ */
+export function registerKit(name, def) {
+  if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,31}$/.test(name)) throw new Error(`Bad kit name: ${name}`);
+  if (!def || typeof def.draw !== 'function') throw new Error(`Kit ${name} needs a draw function`);
+  KITS.set(name, def);
+  kitFailed.delete(name);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('motionsnip:kits'));
+}
+export const kitOf = (name) => KITS.get(name) || null;
+export const kitNames = () => [...KITS.keys()];
+
+function drawKit(g, clip, u, w, h, W, H, opts) {
+  const k = KITS.get(clip.kit);
+  if (!k) return;
+  g.save();
+  try {
+    k.draw(g, { params: clip.params, u, dur: clip.dur, w, h, W, H, img: opts.img || (() => null), clip });
+  } catch (e) {
+    if (!kitFailed.has(clip.kit)) console.error(`[motionsnip] kit ${clip.kit} failed to draw:`, e);
+    kitFailed.add(clip.kit);
+  } finally {
+    g.restore();
+  }
+}
+
 /**
  * Draw one graphics or captions layer (from evalAt) onto g, a canvas W×H px.
  * opts.img(src) → a loaded image or null. Blur boxes blur what is already on g (opts.blur: false skips them).
@@ -208,7 +242,8 @@ export function drawGraphic(g, layer, W, H, opts = {}) {
         g.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
       } else rounded(g, 0, 0, w, h, (clip.radius / 100) * Math.min(w, h));
       g.fill();
-    } else if (clip.type === 'image') {
+    } else if (clip.type === 'kit') drawKit(g, clip, u, w, h, W, H, opts);
+    else if (clip.type === 'image') {
       const img = opts.img?.(clip.src);
       if (img && (img.naturalWidth || img.width)) drawFit(g, img, img.naturalWidth || img.width, img.naturalHeight || img.height, w, h, clip.fit);
     }

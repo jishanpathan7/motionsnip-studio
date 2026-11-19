@@ -220,7 +220,9 @@ async function timelineReel(ctx) {
   const media = new Set();
   for (const t of Array.isArray(raw.tracks) ? raw.tracks : [])
     for (const c of Array.isArray(t?.clips) ? t.clips : []) if (typeof c?.src === 'string' && c.src && (await ctx.store.file(c.src))) media.add(c.src);
-  const reel = timelineToReel(raw, { scenes, src: await lastRender(ctx, raw.version), exists: (rel) => media.has(rel) });
+  // kit clips the add-ons that are on can draw; the rest get a "needs an add-on" check
+  const kits = new Set([...ctx.addons.values()].filter((a) => a.state === 'on').flatMap((a) => a.kits));
+  const reel = timelineToReel(raw, { scenes, src: await lastRender(ctx, raw.version), exists: (rel) => media.has(rel), kits });
   reel.rev = rev; // the base for the editor's saves
   reel.depsRev = crypto.createHash('sha1').update(JSON.stringify(scenes)).digest('hex').slice(0, 12); // the scenes it uses
   reel.path = ctx.store.root;
@@ -2040,6 +2042,33 @@ async function selftest() {
       assert.ok(T.lint({ tracks: [{ kind: 'video', clips: [{ src: 'a.mp4', at: 0, out: 4 }, { src: 'b.mp4', at: 2, out: 4 }] }] }).some((x) => /covers the end/.test(x.title)));
       assert.ok(T.lint({ tracks: [{ kind: 'video', clips: [{ src: 'a.mp4' }] }] }).some((x) => /has no length/.test(x.title)));
       assert.equal(normalizeReel(reel).live.type, 'timeline');
+      // kit clips: drawn by add-ons; params stay plain data; the check names the missing add-on
+      {
+        const kraw = { tracks: [{ kind: 'graphics', clips: [{ type: 'kit', kit: 'ui.terminal', params: { title: 'zsh', accent: '#ff4fa8', speed: 2, lines: ['$ ls'], src: 'shot.png', big: 1e400, deep: { a: { b: { c: { d: { e: 1 } } } } } } }, { type: 'kit', kit: 'Not A Kit' }] }] };
+        const ktl = T.normTimeline(kraw);
+        const kc = ktl.tracks[0].clips[0];
+        assert.equal(kc.type, 'kit');
+        assert.equal(kc.kit, 'ui.terminal');
+        assert.equal(kc.dur, 4);
+        assert.deepEqual(kc.box, [10, 10, 80, 80]);
+        assert.equal(kc.params.big, null, 'only finite numbers');
+        assert.equal(kc.params.deep.a.b.c, null, 'params nest at most 4 deep');
+        assert.equal(T.kitLabel(kc), 'Terminal “zsh”');
+        assert.deepEqual(T.mediaOf(ktl), [{ src: 'shot.png', kind: 'image' }]);
+        const klint = (kits) => T.lint(kraw, { kits, exists: () => true }).map((x) => x.title);
+        assert.ok(klint(new Set()).includes('Terminal “zsh” needs an add-on'));
+        assert.ok(!klint(new Set(['ui.terminal'])).some((x) => /needs an add-on/.test(x)));
+        assert.ok(klint(null).includes('A kit clip with no kit'));
+        assert.ok(T.lint(kraw, { kits: new Set(['ui.terminal']), exists: () => false }).some((x) => x.title === 'shot.png is missing'));
+        const kp = T.editablePaths(kraw);
+        for (const k of ['title', 'accent', 'speed', 'src']) assert.ok(kp.has(`tracks[0].clips[0].params.${k}`), k);
+        assert.ok(!kp.has('tracks[0].clips[0].params.lines'), 'lists are edited by hand or by Claude, not in the Inspector');
+        assert.equal(T.applyPatches(kraw, [{ path: 'tracks[0].clips[0].params.title', value: 'bash' }]).tracks[0].clips[0].params.title, 'bash');
+        assert.throws(() => T.applyPatches(kraw, [{ path: 'tracks[0].clips[0].params.lines', value: [] }]));
+        const big = T.normTimeline({ tracks: [{ kind: 'graphics', clips: [{ type: 'kit', kit: 'ui.code', params: { lines: Array.from({ length: 200 }, () => 'x'.repeat(200)) } }] }] });
+        assert.deepEqual(big.tracks[0].clips[0].params, {});
+        assert.ok(T.lint(big).some((x) => /too much in params/.test(x.title)));
+      }
       // patches: only element props
       assert.equal(T.applyPatches(raw, [{ path: 'tracks[2].clips[0].text', value: 'Hi' }], { scenes }).tracks[2].clips[0].text, 'Hi');
       assert.throws(() => T.applyPatches(raw, [{ path: 'tracks[0].clips[0].src', value: '/etc/passwd' }], { scenes }), /Can't change/);
@@ -2464,6 +2493,9 @@ async function selftest() {
       assert.equal(checkManifest(ok('x', { app: 'a.js' }), path.join(base, 'x')), 'app file not found: a.js');
       assert.match(checkManifest(ok('x'), path.join(base, 'x')), /needs a server or an app/);
       assert.match(checkManifest(ok('x', { server: 'a.txt' }), path.join(base, 'x')), /\.mjs or \.js/);
+      assert.match(checkManifest(ok('hello', { app: 'app.js', provides: { kits: ['Bad Name'] } }), path.join(base, 'hello')), /provides\.kits/);
+      assert.equal(checkManifest(ok('hello', { app: 'app.js', provides: { kits: ['ui.terminal'] }, released: '2026-12-01' }), path.join(base, 'hello')), null);
+      assert.match(checkManifest(ok('hello', { app: 'app.js', released: 'soon' }), path.join(base, 'hello')), /released/);
       assert.deepEqual(defaultAddonDirs({ MOTIONSNIP_ADDONS: ['/a', '/b'].join(path.delimiter) }, '/home/u'), ['/a', '/b']);
       assert.deepEqual(defaultAddonDirs({}, '/home/u'), [path.join('/home/u', '.motionsnip', 'addons')]);
 
@@ -2593,7 +2625,7 @@ async function selftest() {
       // a fake licence server
       const pkgFiles = (version, released) =>
         writeTar([
-          { path: 'addon.json', data: JSON.stringify({ id: 'pro', name: 'MotionSnip Pro', version, core: ADDON_API, app: 'app.js', requires: 'pro', released, provides: { presets: ['ui.terminal'] } }) },
+          { path: 'addon.json', data: JSON.stringify({ id: 'pro', name: 'MotionSnip Pro', version, core: ADDON_API, app: 'app.js', requires: 'pro', released, provides: { kits: ['ui.terminal'] } }) },
           { path: 'app.js', data: 'export default () => {};' },
         ]);
       const fake = { pkg: pkgFiles('0.1.0', '2026-11-01'), refreshes: 0, badPackage: false, licenceFor: null };
@@ -2656,7 +2688,7 @@ async function selftest() {
         assert.equal(r.status, 200, JSON.stringify(r.json));
         assert.deepEqual(r.json.addon, { state: 'on', version: '0.1.0', reason: '' });
         let list = (await request(srv.port, 'GET', '/api/addons')).json.addons;
-        assert.deepEqual(list.find((a) => a.id === 'pro').presets, ['ui.terminal']);
+        assert.deepEqual(list.find((a) => a.id === 'pro').kits, ['ui.terminal']);
 
         // an update replaces it; a damaged download leaves the installed one alone
         fake.pkg = pkgFiles('0.2.0', '2026-11-20');
