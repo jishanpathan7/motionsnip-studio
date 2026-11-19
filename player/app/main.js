@@ -602,6 +602,10 @@ async function boot() {
   initPanel(ui.panel);
   initExport(ui.exportBtn);
   initAddons({ anchor: ui.exportBtn });
+  if (store.master.codeOff.length) {
+    const what = store.master.codeOff.map((x) => (x === 'live' ? 'live renderer' : 'export command')).join(' and ');
+    toast(`Safe mode: this project's ${what} won't run here.`, { ms: 7000 });
+  }
   initKeys();
   initDrop();
   initOutputs(ui.outBar, ui.frame);

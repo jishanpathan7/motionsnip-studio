@@ -5,7 +5,7 @@
 // project's files and a JSON API. Node 18+, no dependencies.
 //
 //   node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
-//                          [--addons <dir>]… [--no-addons]
+//                          [--addons <dir>]… [--no-addons] [--safe]
 //   node player/server.mjs --selftest
 //
 // A folder with a reel.json is a Claude-built project. A folder without one (or a
@@ -1011,6 +1011,8 @@ export async function startServer(opts) {
     cutChild: null,
     takesBusy: new Set(),
     addons: new Map(),
+    // false (--safe): code from the project folder never runs: no export.cmd, no live.js
+    projectCode: opts.projectCode !== false,
   };
   // add-ons from opts.addons (folders that hold add-on folders); none unless asked for
   ctx.addons = await loadAddons(opts.addons || [], {
@@ -1027,6 +1029,11 @@ export async function startServer(opts) {
     });
   });
 
+  // Node closes an idle kept-alive connection after 5 s by default. A browser that sends on that socket just as
+  // it closes gets "Failed to fetch", which can drop an export partway through (a frame batch that takes a few
+  // seconds to draw is enough). Keep idle connections much longer than any pause between requests.
+  server.keepAliveTimeout = 60_000;
+  server.headersTimeout = 65_000;
   const port = await listen(server, opts.port ?? DEFAULT_PORT);
   ctx.port = port;
   const url = `http://localhost:${port}`;
@@ -1210,7 +1217,26 @@ async function loadReel(ctx) {
   const reel = await readReel(ctx);
   const mine = readPlayerOutputs(ctx.dir);
   if (mine.length || reel.outputs) reel.outputs = mergeOutputs(reel.outputs, mine);
-  return reel;
+  return ctx.projectCode ? reel : withoutProjectCode(reel);
+}
+
+/** Safe mode: the reel without the parts that run code from the project folder, and a note of what was left out. */
+export function withoutProjectCode(reel) {
+  const off = [];
+  const out = { ...reel };
+  if (out.export && typeof out.export === 'object' && typeof out.export.cmd === 'string' && out.export.cmd.trim()) {
+    const { cmd, cwd, ...rest } = out.export;
+    out.export = Object.keys(rest).length ? rest : undefined;
+    if (!out.export) delete out.export;
+    off.push('export.cmd');
+  }
+  // a live renderer given as a script file; MotionSnip's own scene and timeline renderers run no project code
+  if (typeof out.live === 'string' && out.live) {
+    delete out.live;
+    off.push('live');
+  }
+  if (off.length) out.codeOff = off;
+  return out;
 }
 
 async function readReel(ctx) {
@@ -1622,6 +1648,7 @@ async function apiExport(ctx, req, res) {
   if (ctx.job.state === 'running') throw httpError(409, 'An export is already running');
   const body = (await readJson(req, EXPORT_LIMIT)) || {};
   const mode = ['render', 'edit'].includes(body.mode) ? body.mode : 'mix';
+  if (mode === 'render' && !ctx.projectCode) throw httpError(403, "This server runs in safe mode (--safe): the project's export command doesn't run");
   const reel = await loadReel(ctx);
 
   // Music: a project path, or none.
@@ -2329,6 +2356,16 @@ async function selftest() {
       assert.equal(r.status, 404);
       r = await req('GET', '/app/brand/favicon.svg');
       assert.equal(r.status, isFile(path.join(BRAND_DIR, 'favicon.svg')) ? 200 : 404);
+      // fonts are served with the player: nothing for an export to fetch from outside
+      r = await req('GET', '/app/fonts/fonts.css');
+      assert.equal(r.status, 200);
+      const fontFiles = [...r.buf.toString().matchAll(/url\('([^']+\.woff2)'\)/g)].map((m) => m[1]);
+      assert.ok(fontFiles.length >= 6, 'fonts.css names its font files');
+      for (const f of new Set(fontFiles)) {
+        const fr = await req('GET', `/app/fonts/${f}`);
+        assert.equal(fr.status, 200, f);
+        assert.equal(fr.headers['content-type'], 'font/woff2');
+      }
       r = await req('GET', '/app/..%2fserver.mjs');
       assert.equal(r.status, 403);
       r = await req('GET', '/app/brand/..%2f..%2fSPEC.md');
@@ -3027,6 +3064,40 @@ async function selftest() {
       await bare.close();
     }
 
+    // Safe mode: export.cmd and a live.js script are left out of the reel, and a render export is refused
+    {
+      assert.deepEqual(withoutProjectCode({ id: 'a', live: { type: 'scene', spec: 'scene.json' } }), { id: 'a', live: { type: 'scene', spec: 'scene.json' } }, "MotionSnip's own renderers stay");
+      assert.deepEqual(withoutProjectCode({ id: 'a', export: { cmd: 'make', cwd: '..', props: { x: 1 } } }), { id: 'a', export: { props: { x: 1 } }, codeOff: ['export.cmd'] });
+      assert.deepEqual(withoutProjectCode({ id: 'a', export: { cmd: '  ' } }), { id: 'a', export: { cmd: '  ' } });
+      const sdir = mkTmp();
+      fs.writeFileSync(path.join(sdir, 'video.mp4'), Buffer.alloc(64));
+      fs.writeFileSync(path.join(sdir, 'live.js'), 'window.MotionSnipLive = () => ({});');
+      fs.writeFileSync(path.join(sdir, 'reel.json'), JSON.stringify({ id: 'safe', version: 1, src: 'video.mp4', duration: 1, live: 'live.js', export: { cmd: 'touch ran.txt' } }));
+      const post = (port) => ({ 'content-type': 'application/json', origin: `http://localhost:${port}` });
+      const safe = await startServer({ dir: sdir, port: 0, open: false, quiet: true, projectCode: false });
+      try {
+        let r = await request(safe.port, 'GET', '/api/reel');
+        assert.equal(r.json.live, undefined);
+        assert.equal(r.json.export, undefined);
+        assert.deepEqual(r.json.codeOff, ['export.cmd', 'live']);
+        r = await request(safe.port, 'POST', '/api/export', { body: JSON.stringify({ mode: 'render' }), headers: post(safe.port) });
+        assert.equal(r.status, 403);
+        assert.match(r.json.error, /safe mode/);
+        assert.ok(!fs.existsSync(path.join(sdir, 'ran.txt')));
+      } finally {
+        await safe.close();
+      }
+      const normal = await startServer({ dir: sdir, port: 0, open: false, quiet: true });
+      try {
+        const r = await request(normal.port, 'GET', '/api/reel');
+        assert.equal(r.json.live, 'live.js');
+        assert.equal(r.json.export.cmd, 'touch ran.txt');
+        assert.equal(r.json.codeOff, undefined);
+      } finally {
+        await normal.close();
+      }
+    }
+
     console.log('selftest ok');
     return 0;
   } catch (err) {
@@ -3043,7 +3114,7 @@ async function selftest() {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null };
+  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null, safe: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -3057,6 +3128,7 @@ function parseArgs(argv) {
     else if (a === '--ffmpeg' || a.startsWith('--ffmpeg=')) opts.ffmpeg = value();
     else if (a === '--addons' || a.startsWith('--addons=')) (opts.addons ||= []).push(value());
     else if (a === '--no-addons') opts.addons = [];
+    else if (a === '--safe') opts.safe = true;
     else if (a === '-h' || a === '--help') opts.help = true;
     else if (a.startsWith('--')) throw new Error(`Unknown option ${a}`);
     else opts.dir = a;
@@ -3075,7 +3147,7 @@ async function main() {
   }
   if (opts.help) {
     console.log(
-      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons]\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).',
+      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons] [--safe]\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).\n--safe: never run code from the project folder (reel.json export.cmd, a live.js renderer).',
     );
     return;
   }
@@ -3104,7 +3176,8 @@ async function main() {
   }
   if (opts.ffmpeg && !isExecutable(opts.ffmpeg)) console.warn(`Note: --ffmpeg ${opts.ffmpeg} is not an executable file.`);
 
-  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg, addons: opts.addons ?? defaultAddonDirs() });
+  if (opts.safe) console.log("Safe mode: the project's export.cmd and live.js won't run.");
+  const app = await startServer({ dir, video, port: opts.port, open: opts.open, ffmpeg: opts.ffmpeg, addons: opts.addons ?? defaultAddonDirs(), projectCode: !opts.safe });
   const stop = () => app.close().then(() => process.exit(0));
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);

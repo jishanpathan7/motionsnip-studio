@@ -75,7 +75,7 @@ You can also start the player yourself on any project folder with a `reel.json`:
 node ~/.claude/skills/motionsnip-studio/player/server.mjs path/to/project
 ```
 
-Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ffmpeg /path/to/ffmpeg`, `--addons <dir>` (add-ons from that folder instead of `~/.motionsnip/addons`), `--no-addons`.
+Options: `--port 4321` (moves to the next free port if busy), `--no-open`, `--ffmpeg /path/to/ffmpeg`, `--addons <dir>` (add-ons from that folder instead of `~/.motionsnip/addons`), `--no-addons`, `--safe` (never run code from the project folder: no `export.cmd`, no `live.js`).
 
 ## Edit any video
 
@@ -226,7 +226,7 @@ The key ideas:
 - Project files are served only from inside the project folder. Hidden files such as `.env` are never served.
 - Uploads accept only mp3, wav and m4a, up to 100 MB. The first bytes must match the file type. Names are cleaned and files are never overwritten.
 - "Show in Finder" works only for files inside the project.
-- If `reel.json` has an `export.cmd`, the render export runs that command on your machine, like an npm script. Only open projects you trust.
+- If `reel.json` has an `export.cmd`, the render export runs that command on your machine, like an npm script. A `live` script (`live.js`) runs in the player page. Only open projects you trust, or start the server with `--safe`, which runs neither: the player shows the rendered video and says what was left out.
 - Add-ons in `~/.motionsnip/addons` run with the same rights as MotionSnip itself, like any program you install. Only install add-ons you trust. An add-on that needs a licence you don't hold stays locked: its code isn't loaded.
 
 ## Tests
@@ -288,6 +288,7 @@ player/index.html     the player page
 player/app/           the player's scripts and styles
 player/app/scene/     the scene compiler and hand-drawn renderer (no dependencies)
 player/app/comp/      the timeline model, edit operations, compositor and frame export
+player/app/fonts/     Bricolage Grotesque, DM Mono and Patrick Hand (SIL Open Font License)
 player/app/tracks.js  the multi-track timeline editor
 docs/SPEC.md          the full product spec
 docs/brand/           logo, favicons and the brand guide
@@ -300,3 +301,5 @@ examples/addons/hello/ an example add-on: one server route and one header button
 ## Licence
 
 [MIT](LICENSE). Copyright (c) 2026 Jishan Pathan.
+
+The fonts in `player/app/fonts/` are under the SIL Open Font License 1.1; each family's licence is beside it.

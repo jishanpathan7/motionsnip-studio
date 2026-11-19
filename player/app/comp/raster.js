@@ -1,13 +1,12 @@
 // Frames to pixels: an SVG frame (or any drawing on a canvas) → pixels, for export. An SVG drawn as an image
-// loads nothing from outside, so the web fonts and pictures it uses are fetched once and inlined as data URLs.
+// loads nothing from outside, so the fonts and pictures it uses are fetched once and inlined as data URLs.
+// The fonts are the ones served with the player (app/fonts/), so an export needs nothing from the internet.
 
-const FONT_CSS = {
-  'Patrick Hand': 'https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap',
-  'Bricolage Grotesque': 'https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&display=swap',
-  'DM Mono': 'https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap',
-};
+const FONTS_CSS = new URL('../fonts/fonts.css', import.meta.url).href;
+const FAMILIES = ['Patrick Hand', 'Bricolage Grotesque', 'DM Mono'];
 
 const fontCache = new Map();
+let fontFaces = null;
 
 const toDataUrl = (blob) =>
   new Promise((resolve, reject) => {
@@ -17,20 +16,34 @@ const toDataUrl = (blob) =>
     r.readAsDataURL(blob);
   });
 
-/** @font-face rules with the font files inlined, for the families an SVG names. Offline: '' (system fonts). */
+/** The @font-face rules of fonts.css. */
+function faces() {
+  fontFaces ||= fetch(FONTS_CSS)
+    .then((r) => (r.ok ? r.text() : ''))
+    .then((css) => css.match(/@font-face\s*\{[^}]*\}/g) || [])
+    .catch(() => []);
+  return fontFaces;
+}
+
+/** @font-face rules with the font files inlined, for the families an SVG names. If they can't load: '' (system fonts). */
 export async function inlineFonts(svg) {
   const css = [];
-  for (const fam of Object.keys(FONT_CSS)) {
+  for (const fam of FAMILIES) {
     if (!svg.includes(fam)) continue;
     if (!fontCache.has(fam)) {
       fontCache.set(
         fam,
         (async () => {
           try {
-            let text = await (await fetch(FONT_CSS[fam])).text();
-            const urls = [...new Set([...text.matchAll(/url\((https:[^)]+)\)/g)].map((m) => m[1]))];
-            for (const u of urls) text = text.split(u).join(await toDataUrl(await (await fetch(u)).blob()));
-            return text;
+            const rules = (await faces()).filter((r) => r.includes(`'${fam}'`));
+            const out = [];
+            for (const rule of rules) {
+              const m = /url\('?([^')]+)'?\)/.exec(rule);
+              if (!m) continue;
+              const data = await toDataUrl(await (await fetch(new URL(m[1], FONTS_CSS))).blob());
+              out.push(rule.replace(m[0], `url('${data}')`));
+            }
+            return out.join('\n');
           } catch {
             return '';
           }

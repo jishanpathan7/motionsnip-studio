@@ -108,8 +108,15 @@ Unknown fields are ignored; missing optional fields get defaults.
 
 ```
 node player/server.mjs <project-dir> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
+                       [--addons <dir>]… [--no-addons] [--safe]
 node player/server.mjs --selftest
 ```
+
+- `--safe` (`startServer({ projectCode: false })`): code from the project folder never runs.
+  - `GET /api/reel` leaves out `export.cmd`/`export.cwd` and a script `live`, and lists what it left out in
+    `codeOff: ['export.cmd', 'live']`. The player says so once.
+  - `POST /api/export {mode: "render"}` returns 403.
+  - MotionSnip's own scene and timeline renderers still run: they draw data, not project code.
 
 - Binds 127.0.0.1. If the port is busy, tries the next one. Prints `MotionSnip Studio: http://localhost:<port>  (project: <dir>)`.
   Opens the browser unless `--no-open`.
@@ -366,7 +373,7 @@ Dark default. Bay `#15121D` (page), Bench `#211C2B` (panels), Paper `#F6F4EF` (t
 `#15121D` (text on light), Grain `#A49DB3` / Lead `#6A6378` (secondary), **Cue** pink `#FF4FA8` (on dark) / `#C2185B` (on
 light) for attention, notes, rings, new version; **Tape** yellow `#E8FF47`, fill only, for Send, edited elements, change
 counts (text on tape is always Bay). Status green/red separate. Type: Bricolage Grotesque (headings 800, UI 500–600),
-DM Mono (timecode, frames, versions, keys) from Google Fonts. Icons: 1.6–2 px strokes, rounded, frames as 3:2 rounded
+DM Mono (timecode, frames, versions, keys), served with the player from `player/app/fonts/` (OFL), as is the scenes' Patrick Hand, so the player and exports work offline. Icons: 1.6–2 px strokes, rounded, frames as 3:2 rounded
 rectangles; colour only when it means something. Motion: ring draw ~420 ms; tape tab lands; send = countdown sweep; new
 version = cue dot flashes twice; all respect `prefers-reduced-motion`. Voice: plain and short, from the reviewer's side
 ("v2 is in · 3 changes applied", "Nothing circled yet").

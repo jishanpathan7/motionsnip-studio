@@ -85,6 +85,8 @@ export function normalizeReel(raw) {
     // a script that defines window.MotionSnipLive, or { type: 'scene' | 'timeline', spec } drawn by MotionSnip itself
     live: typeof r.live === 'string' && r.live ? r.live : r.live && (r.live.type === 'scene' || r.live.type === 'timeline') ? { type: r.live.type, spec: String(r.live.spec || `${r.live.type}.json`) } : null,
     export: r.export && typeof r.export === 'object' ? r.export : null,
+    // what a safe-mode server left out because it runs code from the project folder ('export.cmd', 'live')
+    codeOff: Array.isArray(r.codeOff) ? r.codeOff.filter((x) => x === 'export.cmd' || x === 'live') : [],
   };
   const brand = r.brand && typeof r.brand === 'object' ? r.brand : {};
   reel.brand = {
