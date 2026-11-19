@@ -6,7 +6,7 @@
 import { store, bus, select, getEl, editHooks } from './state.js';
 import { player, seek, currentTime, duration, isPlaying, pause } from './video.js';
 import { h, icon, clamp, fmtTime, projectUrl, toast, api } from './util.js';
-import { normTimeline, findClip, valueAt, KEYS, TRANSITIONS, PRESETS, FONTS, baseName, editablePaths, setPath as tlSetPath } from './comp/timeline.mjs';
+import { normTimeline, findClip, valueAt, KEYS, TRANSITIONS, PRESETS, FONTS, baseName, editablePaths, kitLabel, setPath as tlSetPath } from './comp/timeline.mjs';
 import { applyOps, ensureIds, newId } from './comp/ops.mjs';
 import { setPath as sceneSetPath, normScene } from './scene/compile.mjs';
 
@@ -421,6 +421,7 @@ function trackHead(tr) {
 
 function clipLabel(tr, c) {
   if (c.name) return c.name;
+  if (tr.kind === 'graphics' && c.type === 'kit') return kitLabel(c);
   if (tr.kind === 'graphics') return c.type === 'text' ? c.text || 'Text' : c.type[0].toUpperCase() + c.type.slice(1);
   if (tr.kind === 'captions') return c.text || 'Caption';
   if (tr.kind === 'scene') return `${c.scene} · ${c.shots.join(', ')}`;
@@ -573,6 +574,22 @@ async function pumpThumbs() {
 
 // ---------------------------------------------------------------- toolbar
 
+// buttons add-ons put in the toolbar's "add" group (addons.js host.addToolButton)
+const extraTools = [];
+
+/** An add-on's button beside Text, Shape and Caption. onClick runs with nothing; use addKitClip to add clips. */
+export function addToolButton(tool) {
+  extraTools.push(tool);
+  if (ED.host) render();
+}
+
+/** Add a graphics clip at the playhead (a kit clip from an add-on). False when this isn't a timeline project. */
+export function addKitClip(clip) {
+  if (!ED.host || !ED.raw) return false;
+  addClip('graphics', { type: 'kit', dur: 4, box: [10, 10, 80, 80], ...clip }, currentTime());
+  return true;
+}
+
 function toolbar() {
   const tl = model();
   const sel = selectedClip();
@@ -590,6 +607,7 @@ function toolbar() {
       b('Caption', 'captions', addCaption),
       sceneFiles.length ? b('Scene', 'image', () => addScene(sceneFiles[0]), { title: `Add ${sceneFiles[0]} at the playhead` }) : null,
       b('Media', 'upload', () => fileIn.click(), { title: 'Add a video, picture or sound at the playhead (or drop files on a track)' }),
+      ...extraTools.map((t) => b(t.label, t.icon || 'plus', t.onClick, { title: t.title || t.label })),
       fileIn,
     ),
     h(

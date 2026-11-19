@@ -355,6 +355,8 @@ export function createTimeline(host, raw, opts = {}) {
 
   const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null;
   ro?.observe(host);
+  // an add-on registered a kit (graphics.mjs registerKit): draw again so its clips appear
+  window.addEventListener('motionsnip:kits', schedule);
 
   // ------------------------------------------------------------ export: any time, onto a canvas
 
@@ -501,6 +503,7 @@ export function createTimeline(host, raw, opts = {}) {
     destroy() {
       dead = true;
       ro?.disconnect();
+      window.removeEventListener('motionsnip:kits', schedule);
       for (const id of [...media.keys()]) dropMedia(id);
       for (const v of exportVideos.values()) {
         v.removeAttribute('src');

@@ -41,6 +41,7 @@ import { initPanel, render as renderPanel, uploadAudio, focusSend } from './pane
 import { startCheck, sendableCount, checkSummary } from './feedback.js';
 import { initExport, updateButton as updateExportButton } from './export.js';
 import { initAddons } from './addons.js';
+import { initPro } from './pro.js';
 import { initFavicon, setFavicon } from './favicon.js';
 import { initKeys, toggleSheet } from './keys.js';
 import { initVedit, hint as plainHint, addLogoFile } from './vedit.js';
@@ -602,6 +603,7 @@ async function boot() {
   initPanel(ui.panel);
   initExport(ui.exportBtn);
   initAddons({ anchor: ui.exportBtn });
+  initPro({ anchor: ui.keysBtn });
   if (store.master.codeOff.length) {
     const what = store.master.codeOff.map((x) => (x === 'live' ? 'live renderer' : 'export command')).join(' and ');
     toast(`Safe mode: this project's ${what} won't run here.`, { ms: 7000 });

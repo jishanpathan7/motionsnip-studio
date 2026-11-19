@@ -7,7 +7,26 @@ import { normScene, toReel as sceneToReel, movesOf } from '../scene/compile.mjs'
 
 export const KINDS = ['video', 'scene', 'graphics', 'audio', 'captions'];
 export const VISUAL = new Set(['video', 'scene', 'graphics', 'captions']);
-export const GFX = ['text', 'shape', 'image', 'blur'];
+export const GFX = ['text', 'shape', 'image', 'blur', 'kit'];
+/** A kit clip's name: drawn by an add-on (addon.json provides.kits), like "ui.terminal". */
+export const KIT_NAME = /^[a-z0-9][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,31}$/;
+const KIT_PARAMS_MAX = 20000; // characters of JSON
+const IMAGE_SRC = /\.(png|jpe?g|webp|gif|svg)$/i;
+
+/** A kit clip's params as plain JSON data (strings, finite numbers, booleans, null, lists, objects), or null. */
+function kitParams(v, depth = 0) {
+  if (v === null || typeof v === 'boolean') return v;
+  if (typeof v === 'string') return v.slice(0, 4000);
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (depth >= 4) return null;
+  if (Array.isArray(v)) return v.slice(0, 200).map((x) => kitParams(x, depth + 1));
+  if (obj(v)) {
+    const out = {};
+    for (const [k, x] of Object.entries(v).slice(0, 100)) if (!['__proto__', 'prototype', 'constructor'].includes(k)) out[k] = kitParams(x, depth + 1);
+    return out;
+  }
+  return null;
+}
 export const PRESETS = ['none', 'fade', 'pop', 'slide-up', 'type-on', 'word-stagger'];
 export const TRANSITIONS = ['fade', 'wipe', 'slide', 'zoom'];
 export const EASES = ['linear', 'in', 'out', 'inOut', 'hold'];
@@ -251,7 +270,7 @@ function normClip(c, track, tl) {
     }
     case 'graphics': {
       out.type = GFX.includes(c.type) ? c.type : 'text';
-      out.box = normBox(c.box, out.type === 'text' ? [10, 40, 80, 20] : [35, 35, 30, 30]);
+      out.box = normBox(c.box, out.type === 'text' ? [10, 40, 80, 20] : out.type === 'kit' ? [10, 10, 80, 80] : [35, 35, 30, 30]);
       if (out.type === 'text') {
         out.text = str(c.text);
         const s = obj(c.style) || {};
@@ -272,8 +291,17 @@ function normClip(c, track, tl) {
       } else if (out.type === 'image') {
         out.src = str(c.src);
         out.fit = c.fit === 'cover' ? 'cover' : 'contain';
+      } else if (out.type === 'kit') {
+        out.kit = KIT_NAME.test(str(c.kit)) ? c.kit : '';
+        out.badKit = !out.kit;
+        let params = obj(kitParams(obj(c.params) || {})) || {};
+        if (JSON.stringify(params).length > KIT_PARAMS_MAX) {
+          params = {};
+          out.bigParams = true;
+        }
+        out.params = params;
       } else out.amount = clamp(num(c.amount, 12), 1, 60);
-      if (!(dur > 0)) dur = 3;
+      if (!(dur > 0)) dur = out.type === 'kit' ? 4 : 3;
       break;
     }
     case 'captions': {
@@ -404,6 +432,9 @@ export function mediaOf(tl) {
     for (const c of tr.clips) {
       const kind = tr.kind === 'graphics' ? (c.type === 'image' ? 'image' : null) : tr.kind === 'video' || tr.kind === 'audio' ? tr.kind : null;
       if (kind && c.src && !seen.has(c.src)) seen.set(c.src, kind);
+      // a kit clip's picture (a window's screenshot): params.src
+      const ks = tr.kind === 'graphics' && c.type === 'kit' ? c.params.src : null;
+      if (typeof ks === 'string' && IMAGE_SRC.test(ks) && !seen.has(ks)) seen.set(ks, 'image');
     }
   return [...seen].map(([src, kind]) => ({ src, kind }));
 }
@@ -451,10 +482,35 @@ const FULL = [0, 0, 100, 100];
 
 function clipLabel(tr, c) {
   if (c.name) return c.name;
+  if (tr.kind === 'graphics' && c.type === 'kit') return kitLabel(c);
   if (tr.kind === 'graphics') return c.type === 'text' ? `“${(c.text || 'Text').slice(0, 24)}”` : c.type[0].toUpperCase() + c.type.slice(1);
   if (tr.kind === 'captions') return `Caption “${(c.text || '').slice(0, 20)}”`;
   if (tr.kind === 'scene') return `Scene ${c.shots.join(', ') || c.scene}`;
   return baseName(c.src) || 'Clip';
+}
+
+/** "ui.terminal" → "Terminal"; its title or text param, when it has one, after it. */
+export function kitLabel(c) {
+  const base = (c.kit || 'kit').split('.').pop().replace(/-/g, ' ');
+  const name = base[0].toUpperCase() + base.slice(1);
+  const t = typeof c.params?.title === 'string' ? c.params.title : typeof c.params?.text === 'string' ? c.params.text : '';
+  return t ? `${name} “${t.slice(0, 20)}”` : name;
+}
+
+const HEX = /^#[0-9a-f]{3,8}$/i;
+/** A kit clip's own settings as element props: its top-level text, number and colour params. */
+function kitProps(c, P) {
+  const props = {};
+  for (const [k, v] of Object.entries(c.params).slice(0, 24)) {
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(k)) continue;
+    const label = k.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (x) => x.toUpperCase());
+    const path = P(`params.${k}`);
+    if (typeof v === 'number') props[`kit_${k}`] = { type: 'number', label, v, path };
+    else if (typeof v === 'string' && HEX.test(v)) props[`kit_${k}`] = { type: 'color', label, v, path };
+    else if (typeof v === 'string' && k === 'src') props[`kit_${k}`] = { type: 'media', label: 'Picture', v, path };
+    else if (typeof v === 'string') props[`kit_${k}`] = { type: v.length > 60 || v.includes('\n') ? 'longtext' : 'text', label, v, path };
+  }
+  return props;
 }
 
 function clipProps(tr, c) {
@@ -471,6 +527,8 @@ function clipProps(tr, c) {
     props.radius = { type: 'number', label: 'Corners', v: c.radius, min: 0, max: 50, path: P('radius') };
   } else if (tr.kind === 'graphics' && c.type === 'image') {
     props.src = { type: 'media', label: 'Image', v: c.src, path: P('src') };
+  } else if (tr.kind === 'graphics' && c.type === 'kit') {
+    Object.assign(props, kitProps(c, P));
   } else if (tr.kind === 'graphics' && c.type === 'blur') {
     props.amount = { type: 'number', label: 'Blur', v: c.amount, min: 1, max: 60, path: P('amount') };
   } else if (tr.kind === 'captions') {
@@ -524,7 +582,7 @@ function boxAt(c, u) {
  * (`path`), scene clips bring their scene's own elements (props with `file`), lint findings are review rings.
  * opts: { scenes, src, exists(path) → bool }
  */
-export function toReel(raw, { scenes = {}, src = '', exists = null } = {}) {
+export function toReel(raw, { scenes = {}, src = '', exists = null, kits = null } = {}) {
   const tl = normTimeline(raw, { scenes });
   const secs = sections(tl);
   const els = [];
@@ -567,7 +625,7 @@ export function toReel(raw, { scenes = {}, src = '', exists = null } = {}) {
     timeline: true,
     audio: { videoAudio: 'mix' },
     scenes: scenesOut,
-    review: lint(tl, { exists }),
+    review: lint(tl, { exists, kits }),
     live: { type: 'timeline', spec: 'timeline.json' },
   };
 }
@@ -601,7 +659,7 @@ function sceneEls(tl, clip, rawSpec) {
 // ---------------------------------------------------------------- the timeline's own checks
 
 /** Things a viewer or the export would trip on. exists(path) → bool checks media files when given. */
-export function lint(tlOrRaw, { exists = null, scenes } = {}) {
+export function lint(tlOrRaw, { exists = null, scenes, kits = null } = {}) {
   const tl = tlOrRaw && tlOrRaw.issues ? tlOrRaw : normTimeline(tlOrRaw, { scenes });
   const out = [];
   const add = (f) => out.length < 40 && out.push({ id: `check-${out.length + 1}`, kind: 'timeline check', t: 0, ...f });
@@ -629,6 +687,12 @@ export function lint(tlOrRaw, { exists = null, scenes } = {}) {
         const words = c.text.trim().split(/\s+/).filter(Boolean).length;
         const wps = words / c.dur;
         if (wps > 3.2 && words > 2) add({ ...where, title: 'Too fast to read', detail: `${Math.round(wps * 10) / 10} words a second; about 3 is comfortable.`, fix: `Show it for ${Math.round((words / 2.8) * 10) / 10} s, or shorten it.` });
+      }
+      if (tr.kind === 'graphics' && c.type === 'kit') {
+        if (c.badKit) add({ ...where, title: 'A kit clip with no kit', detail: 'kit must name what draws it, like "ui.terminal".', fix: 'Set its kit, or remove the clip.' });
+        else if (kits && !kits.has(c.kit)) add({ ...where, title: `${label} needs an add-on`, detail: `"${c.kit}" is drawn by an add-on that isn't on here, so it is left out of the picture and the export.`, fix: c.kit.startsWith('ui.') ? 'Turn on MotionSnip Pro (the Pro button in the header), or remove the clip.' : 'Install the add-on that draws it, or remove the clip.' });
+        if (c.bigParams) add({ ...where, title: `${label} has too much in params`, detail: `Over ${KIT_PARAMS_MAX} characters; it was left empty.`, fix: 'Shorten it, or split it into more clips.' });
+        if (exists && typeof c.params.src === 'string' && c.params.src && !exists(c.params.src)) add({ ...where, title: `${baseName(c.params.src)} is missing`, detail: c.params.src, fix: 'Put the file in the project folder or fix the path.' });
       }
       if (tr.kind === 'graphics' && c.type === 'text') {
         if (!c.text.trim()) add({ ...where, title: 'Empty text', fix: 'Type something or remove the clip.' });

@@ -367,7 +367,9 @@ with an `addon.json`, found in `~/.motionsnip/addons/<id>/`. The folders in `MOT
 - `core`: the add-on API the add-on was written for. This MotionSnip has API 1; any other value isn't loaded.
 - `server` and `app`: optional, but at least one is needed. Each must be a `.mjs` or `.js` file inside the folder.
 - `requires`: a licence name. An add-on that needs a licence the user doesn't hold is **locked**: its code isn't
-  imported and its files aren't served. No licences exist yet, so such an add-on stays locked.
+  imported and its files aren't served (see 6d).
+- `released`: optional, a `YYYY-MM-DD` date. A lapsed licence still runs add-on versions released while it was paid.
+- `provides.kits`: optional, the timeline kit clips the add-on draws (names like `ui.terminal`; see 6e).
 
 **Server half.** `export default async function setup(addon)`, which must finish within 5 s. It gets
 `{ id, dir, version, log, helpers, route(method, name, handler) }`.
@@ -377,10 +379,11 @@ with an `addon.json`, found in `~/.motionsnip/addons/<id>/`. The folders in `MOT
 
 **Player half.** `export default async function start(host)`, imported from `/addons/<id>/<app>`. It gets
 `{ id, name, version, store, bus, h, icon, toast, api(name, opts), url(file), addHeaderButton({ label, icon, title,
-onClick }) }`. The add-on reads `store` and listens on `bus`; it changes the project through the API.
+onClick }), registerKit(name, def), addToolButton({ label, icon, title, onClick }), addKitClip(clip) }` (kits: 6e). The add-on reads `store` and listens on `bus`; it changes the project through the API.
 
 **Listing and files.**
-- `GET /api/addons` returns `{ addons: [{ id, name, version, state: 'on' | 'locked' | 'error', reason?, app? }] }`.
+- `GET /api/addons` returns `{ addons: [{ id, name, version, state: 'on' | 'locked' | 'error', reason?, app?, kits? }] }`.
+  `app` carries `?t=<file time>` so an updated add-on's code loads instead of a cached copy.
 - `/addons/<id>/*` serves an add-on's files only while it is on. Hidden files are never served.
 
 **Failure.** A bad manifest, another API version, an id already loaded, a setup that throws, or an app that fails to
@@ -388,6 +391,64 @@ start: that add-on is reported and left out, and the core and the other add-ons 
 
 Add-on code runs with the same rights as the core, so only install add-ons you trust. `examples/addons/hello/` is a
 working example with one route and one header button.
+
+## 6d. MotionSnip Pro licence
+
+Pro is a closed-source add-on (`id: "pro"`, `requires: "pro"`). The core only checks a signed licence and installs
+the add-on (`player/lib/licence.mjs`, `pro.mjs`, `tar.mjs`; the player's `app/pro.js`). Its home is
+`$MOTIONSNIP_HOME` or `~/.motionsnip`. A server started from code has no licences unless it is given `opts.home`.
+
+**The licence**, `<home>/licence.json`, written by the licence server and kept private (mode 600):
+
+```jsonc
+{ "v": 1, "kid": "k1",
+  "claims": { "sub": "<key id>", "act": "<activation id>", "plan": "pro", "features": ["pro"],
+              "install": "<sha256 of <home>/install-id>", "issued": "…", "expires": "…" | null, "updates_until": "…" | null },
+  "sig": "<base64url Ed25519 over the claims as JSON with keys sorted>" }
+```
+
+- It is good when the signature checks out against a key in `LICENCE_KEYS` (by `kid`), `install` is this computer's,
+  and the feature is listed.
+- `expires` is the paid period's end plus 14 days; `null` never expires. Within those 14 days the state is `grace`.
+- After `expires`, the state is `fallback` when `updates_until` is set: add-ons whose `released` date is on or before it
+  keep working. Without it the state is `expired`.
+- `install-id` is random, made the first time a key is activated.
+
+**Routes** (no key or licence is ever sent to the page):
+- `GET /api/licence` → `{ state: 'none' | 'valid' | 'grace' | 'fallback' | 'expired' | 'invalid', reason, plan,
+  expires, periodEnd, updatesUntil, addon: { state, version, reason } | null, buy }`. 404 when the server has no home.
+- `POST /api/licence/activate { key }`, `/refresh`, `/deactivate`, `/install`. Each answers like the GET and reloads
+  the add-ons. Errors are short messages; 503 when the licence server can't be reached.
+
+**The licence server** (`https://licence.motionsnip.com`): `POST /activate { key, install }` and `/refresh { licence }`
+answer `{ licence }`; `/deactivate { licence }`; `/download { licence }` answers `{ name, version, released, sha256, size, kid, sig, url }`,
+where `name` is `motionsnip-pro` and `sig` is the licence key's Ed25519 signature of the canonical JSON of
+`{ name, version, released, sha256, size }`; the bytes must match `size` and `sha256`. The signed manifest is kept as `<home>/addons/pro/.package.json`; a lapsed
+licence's fallback goes by its signed `released`, not the date in the add-on's own `addon.json`. The package is a tar of the add-on folder (files and
+folders only). It is checked, unpacked beside `<home>/addons/pro` and swapped in, so a failed update leaves the old one.
+
+**Network.** These calls happen only when you use Pro, plus one at start when a licence ends within 7 days.
+
+**Command line:** `--activate <key>` (activates and installs), `--install-pro`, `--deactivate`, `--licence`.
+
+## 6e. Kit clips (graphics drawn by add-ons)
+
+A graphics clip `{ "type": "kit", "kit": "<addon>.<name>", "params": { … }, "box", "keys", "enter", "exit" }` is drawn
+by an add-on. The core keeps `params` as plain JSON data (strings up to 4,000 characters, finite numbers, booleans,
+null, lists of up to 200 items, objects of up to 100 keys, 4 levels deep, 20,000 characters in all) and never interprets
+it, except `params.src`: a picture it preloads for the preview and export, and checks exists.
+
+- **Drawing.** The add-on's player half calls `host.registerKit(name, { label, draw })` for each name in its
+  `provides.kits`. `draw(g, { params, u, dur, w, h, W, H, img, clip })` paints a w×h box at the origin of a canvas
+  context that already has the clip's box, keys and transitions applied. `u` is seconds into the clip; `img(src)`
+  gives a loaded project picture or null. The same call draws the preview and the export's frames, so drawing must
+  depend only on its arguments. A draw that throws is logged once and draws nothing.
+- **Missing.** A kit nobody registered draws nothing. The server's timeline check lists `"<label> needs an add-on"`,
+  using the `kits` of the add-ons that are on.
+- **Editing.** The Inspector shows a kit clip's top-level text, number and `#colour` params, and `src` as a picture;
+  `project-apply` accepts those `params.<key>` paths. Lists and objects are edited in `timeline.json`.
+- **Adding.** `host.addToolButton({ label, icon, title, onClick })` puts a button in the timeline toolbar's add group;
+  `host.addKitClip({ kit, params, dur?, box? })` adds a kit clip at the playhead.
 
 ## 7. Brand (see docs/brand/README.md)
 

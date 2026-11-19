@@ -353,6 +353,8 @@ When the video mixes things (the user's footage, a scene or two, titles and lowe
 - Media files live in the project (`assets/`). Use only footage, music and images the user gave you or has rights to.
 - A `timeline.json` with `"from": "<video file>"` was made by **Open in timeline** from that plain video and the user's edits (trim and cuts are back-to-back clips of it). Keep `from` as it is: it tells the player which video the timeline belongs to.
 
+- **Kit clips** come from add-ons: `{ "type": "kit", "kit": "ui.terminal", "dur": 6, "box": [...], "params": { ... } }` on a graphics track. They are drawn only when the add-on that provides the kit is on; otherwise the player shows a "needs an add-on" check and leaves them out of the picture and the export. With MotionSnip Pro installed (`~/.motionsnip/addons/pro/`), read its `GUIDE.md` for the `ui.*` kits (windows, browser, terminal, code, cursor, typing, toast, spotlight) and their params before using them. Don't use a kit the user doesn't have.
+
 **Plain words to fields:** "tighter" is shorter clips and less space between them; "punchier titles" is `pop` or `word-stagger`, a heavier `weight`, a bigger `size`; "a slow zoom" is `scale` keys from 1 to 1.05–1.1; "softer cut" is an `enter`/`exit` fade of 0.3–0.6 s; "music too loud under the voice" is a lower music `gain`; "subtitles" are a captions track, one short line per clip, at least about 1 s per 3 words.
 
 The user exports from the player (MP4, HEVC, ProRes, WebM, GIF; 720p to 4K; captions drawn in or saved as `.srt` and `.vtt`), and makes 9:16, 1:1 and bumper versions from the export with **Cutdown**. Bump `version` in `timeline.json` when you finish a round, as with any project.
