@@ -29,6 +29,8 @@ const KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{7,127}$/;
 export const PACKAGE_NAME = 'motionsnip-pro';
 /** The text a package signature covers: the manifest's signed fields as canonical JSON (the licence key signs it too). */
 export const packageSigText = ({ name, version, released, sha256, size }) => canonical({ name, version, released, sha256, size });
+/** Where an installed Pro package keeps the manifest it was signed with (its `released` decides the fallback). */
+export const PACKAGE_FILE = '.package.json';
 
 export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SERVER, fetch = globalThis.fetch, log = () => {} }) {
   let install = (await installId(home, { create: false })) || null;
@@ -36,6 +38,18 @@ export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SE
   const addonsDir = path.join(home, 'addons');
 
   const status = () => verifyLicence(readLicence(home), { keys, install: hash });
+
+  /** The release date signed for the installed Pro package, or null (none, or not signed by us). */
+  function signedReleased() {
+    let m;
+    try {
+      m = JSON.parse(fs.readFileSync(path.join(addonsDir, PRO_ID, PACKAGE_FILE), 'utf8'));
+    } catch {
+      return null;
+    }
+    if (!m || m.name !== PACKAGE_NAME || typeof m.released !== 'string') return null;
+    return verifySigned(packageSigText(m), m.sig, m.kid, keys) ? m.released : null;
+  }
 
   async function call(route, body) {
     let r;
@@ -62,7 +76,9 @@ export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SE
     home,
     addonsDir,
     status,
-    entitled: (name, { released } = {}) => holds(status(), name, { released }),
+    /** For loadAddons. A lapsed licence's fallback goes by the signed release date, not the add-on's own addon.json. */
+    entitled: (name) => holds(status(), name, { released: signedReleased() }),
+    signedReleased,
 
     async activate(key) {
       key = typeof key === 'string' ? key.trim() : '';
@@ -157,6 +173,7 @@ export async function createPro({ home, keys = LICENCE_KEYS, server = LICENCE_SE
         } catch {}
         const err = checkManifest(manifest, dir);
         if (err) throw httpError(502, `The Pro package is broken: ${err}`);
+        await fsp.writeFile(path.join(dir, PACKAGE_FILE), JSON.stringify({ name, version, released, sha256, size, kid, sig }, null, 2) + '\n');
         const target = path.join(addonsDir, PRO_ID);
         const old = path.join(stage, 'old');
         if (fs.existsSync(target)) await fsp.rename(target, old);

@@ -2653,7 +2653,8 @@ async function selftest() {
           const version = JSON.parse(readTar(fake.pkg).find((e) => e.path === 'addon.json').data).version;
           // badPackage: the bytes don't match the (signed) hash, as when a download is cut or changed on the way
           const told = fake.badPackage ? sha.replace(/^./, (c) => (c === '0' ? '1' : '0')) : sha;
-          const m = { name: 'motionsnip-pro', version, released: '2026-11-01T00:00:00.000Z', sha256: told, size: fake.pkg.length };
+          const released = new Date(JSON.parse(readTar(fake.pkg).find((e) => e.path === 'addon.json').data).released).toISOString();
+          const m = { name: 'motionsnip-pro', version, released, sha256: told, size: fake.pkg.length };
           return send(200, { ok: true, ...m, kid: 't1', sig: signText(packageSigText(m)), url: '/pkg' });
         }
         if (req.url === '/pkg') {
@@ -2711,6 +2712,25 @@ async function selftest() {
         r = await request(srv.port, 'GET', '/api/licence');
         assert.equal(r.json.state, 'fallback');
         assert.equal(r.json.addon.state, 'on', '0.2.0 (released 2026-11-20) was released while paid');
+        assert.equal(srv.ctx.pro.signedReleased(), '2026-11-20T00:00:00.000Z');
+        // the signed date counts, not addon.json: moving it earlier, or losing the signed manifest, doesn't help
+        await L.writeLicence(home, sign(claims({ install: hashHere, expires: iso(t - DAY), updates_until: '2026-11-15T00:00:00Z' })));
+        const proJson = path.join(addonsDir, 'pro', 'addon.json');
+        fs.writeFileSync(proJson, JSON.stringify({ ...JSON.parse(fs.readFileSync(proJson, 'utf8')), released: '2026-11-01' }));
+        await srv.ctx.loadAddons();
+        assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.state, 'locked', 'an edited addon.json date is ignored');
+        await L.writeLicence(home, sign(claims({ install: hashHere, expires: iso(t - DAY), updates_until: '2026-11-22T00:00:00Z' })));
+        const pkgJson = path.join(addonsDir, 'pro', '.package.json');
+        const signed = fs.readFileSync(pkgJson, 'utf8');
+        fs.writeFileSync(pkgJson, signed.replace('2026-11-20', '2026-11-02'));
+        await srv.ctx.loadAddons();
+        assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.state, 'locked', 'a changed signed manifest is refused');
+        fs.rmSync(pkgJson);
+        await srv.ctx.loadAddons();
+        assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.state, 'locked', 'no signed manifest, no fallback');
+        fs.writeFileSync(pkgJson, signed);
+        await srv.ctx.loadAddons();
+        assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.state, 'on');
         await L.writeLicence(home, sign(claims({ install: hashHere, expires: iso(t - DAY), updates_until: '2026-11-10T00:00:00Z' })));
         await srv.ctx.loadAddons();
         assert.equal((await request(srv.port, 'GET', '/api/licence')).json.addon.state, 'locked');

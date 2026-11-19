@@ -10,7 +10,7 @@
 //     "app": "app.js",         // optional: export default async function start(host) { ... } in the player
 //     "requires": "pro",       // optional: the licence it needs; without that licence it stays locked
 //     "released": "2026-12-01", // optional: its release date; a lapsed licence still runs versions released
-//                              // while it was paid for (lib/licence.mjs)
+//                              // while it was paid for (lib/licence.mjs; for Pro, the signed package date counts)
 //     "provides": { "kits": ["ui.terminal"] }  // optional: the timeline kit clips it draws ({ type: "kit" })
 //   }
 //
