@@ -334,6 +334,8 @@ export async function startServer(opts) {
       cutdown: { state: 'idle', pct: 0, line: '', id: null, label: null },
     }),
     takesBusy: new Set(),
+    // a frame export whose page stops sending frames for this long ends on its own (the selftest shortens it)
+    framesIdleMs: Number(opts.framesIdleMs) > 0 ? Number(opts.framesIdleMs) : 20000,
     addons: new Map(),
     // false (--safe): code from the project folder never runs: no export.cmd, no live.js
     projectCode: opts.projectCode !== false,
@@ -812,21 +814,40 @@ async function hasSound(ctx, ff, file) {
   return ctx.sound.get(sig);
 }
 
-async function apiFramesStart(ctx, req, res) {
-  // a frame export whose page went away (reload, closed tab) stops blocking after 20 s without frames
-  const stale = ctx.frames && Date.now() - ctx.frames.last > 20000;
-  if (stale) {
-    ctx.frames.failed = 'Abandoned';
-    ctx.frames.child.kill('SIGKILL');
-    fs.rmSync(ctx.frames.out, { force: true });
-    fs.rmSync(ctx.frames.picture, { force: true });
-    ctx.frames = null;
-    ctx.jobs.export.reset();
+const FFMPEG_MISSING = 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.';
+
+/**
+ * Start a task on a lane, before any await, so two requests can't both start one. run(job) does the work; if it
+ * throws before the task really started (a bad request), the lane goes back to how it was.
+ */
+async function startJob(lane, busy, fields, run) {
+  if (lane.running) throw httpError(409, busy);
+  const job = lane.begin(fields);
+  try {
+    return await run(job);
+  } catch (err) {
+    job.abort();
+    throw err;
   }
-  if (ctx.jobs.export.running) throw httpError(409, 'An export is already running');
+}
+
+/** An export failed: its status says why and names no file. */
+const failExport = (job, line) => job.fail(line, { out: null, rel: null });
+
+/**
+ * A frame export: the page draws frames and pushes them here, they go into ffmpeg's stdin, and frames-end
+ * finishes the file. Its phases: drawing (pushes arrive) → ending (encoding, then adding sound) → done | error,
+ * or cancelled (frames-end ?cancel=1), abandoned (no frames for ctx.framesIdleMs) or failed (ffmpeg exits early).
+ * Every way out goes through the job (lib/jobs.mjs), which removes the half-made files.
+ */
+function apiFramesStart(ctx, req, res) {
+  return startJob(ctx.jobs.export, 'An export is already running', { line: 'Starting…', mode: 'frames' }, (job) => startFrames(ctx, req, res, job));
+}
+
+async function startFrames(ctx, req, res, job) {
   const body = (await readJson(req)) || {};
   const ff = ffmpegFor(ctx);
-  if (!ff) throw httpError(400, 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
+  if (!ff) throw httpError(400, FFMPEG_MISSING);
   const format = FORMATS[body.format] ? body.format : 'mp4';
   const encoder = (await formatsFor(ctx, ff))[format];
   if (!encoder) throw httpError(400, `This ffmpeg can't make ${FORMATS[format].label}.`);
@@ -879,28 +900,44 @@ async function apiFramesStart(ctx, req, res) {
       args.splice(i, 2, '-/filter_complex', graphFile);
     }
   } else args = buildFramesArgs({ fps, w, h, frames, out: picture, format, encoder, raw });
-  const child = spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['pipe', 'pipe', 'pipe'] });
-  const id = crypto.randomBytes(6).toString('hex');
-  const job = { id, child, total: frames, got: 0, last: Date.now(), out, picture, audio, duration: frames / fps, rel, format, frameBytes: raw ? w * h * 4 : 0, lastFrame: null, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif', captions: !!body.captions && !!reel.timeline };
+
+  const j = { id: job.id, job, child: null, total: frames, got: 0, last: Date.now(), pushing: 0, ending: false, out, picture, audio, duration: frames / fps, rel, format, frameBytes: raw ? w * h * 4 : 0, lastFrame: null, failed: null, version: reel.version, setSrc: !!body.setSrc && format !== 'gif', captions: !!body.captions && !!reel.timeline };
+  // however the job ends: the temp files go, and the output too unless it worked
+  job.cleanup((ok) => {
+    clearInterval(j.idle);
+    if (ctx.frames === j) ctx.frames = null;
+    if (graphFile) fs.rmSync(graphFile, { force: true });
+    if (j.picture !== j.out) fs.rmSync(j.picture, { force: true });
+    if (!ok) fs.rmSync(j.out, { force: true });
+  });
+  // a page that went away (reload, closed tab) stops sending frames: the export ends on its own
+  j.idle = setInterval(() => {
+    if (j.ending || j.pushing || Date.now() - j.last < ctx.framesIdleMs) return;
+    j.failed = 'Abandoned: the page stopped sending frames';
+    job.cancel();
+  }, Math.max(50, Math.min(5000, ctx.framesIdleMs / 4)));
+  j.idle.unref?.();
+  ctx.frames = j;
+  const child = job.attach(spawn(ff.path, args, { env: ffmpegEnv(ff), stdio: ['pipe', 'pipe', 'pipe'] }));
+  j.child = child;
   let errText = '';
   child.stderr.on('data', (d) => (errText = (errText + d).slice(-4000)));
   child.stdout.resume(); // -progress output: unread, its pipe fills and ffmpeg stops mid-export
   child.stdin.on('error', () => {}); // EPIPE when ffmpeg stops early; reported from 'close'
-  job.done = new Promise((resolve) => {
+  j.done = new Promise((resolve) => {
     child.on('error', (err) => {
-      job.failed = err.message;
+      j.failed ||= err.message;
       resolve();
     });
     child.on('close', (code) => {
-      if (code !== 0 && !job.failed) job.failed = lastLine(errText) || `ffmpeg exited with code ${code}`;
-      if (graphFile) fs.rmSync(graphFile, { force: true });
+      if (code !== 0 && !j.failed) j.failed = lastLine(errText) || `ffmpeg exited with code ${code}`;
+      // ffmpeg stopped while frames were still coming: the export has failed now, not when the page next asks
+      if (j.failed && !j.ending) failExport(job, j.failed);
       resolve();
     });
   });
-  ctx.frames = job;
-  ctx.jobs.export.attach(child);
-  ctx.jobs.export.begin({ line: `Drawing frames (0/${frames})…`, out, rel, mode: 'frames' });
-  return sendJson(res, 200, { job: id, format, encoder, w, h, fps, frames, rel, composed: !!comp });
+  job.set({ line: `Drawing frames (0/${frames})…`, out, rel });
+  return sendJson(res, 200, { job: job.id, format, encoder, w, h, fps, frames, rel, composed: !!comp });
 }
 
 function framesJob(ctx, url) {
@@ -909,10 +946,42 @@ function framesJob(ctx, url) {
   return j;
 }
 
+/**
+ * Write to ffmpeg's stdin; when its buffer is full, wait until it takes more or exits (a dead ffmpeg never
+ * drains, so waiting on 'drain' alone would hang the request forever).
+ */
+function feed(j, buf) {
+  if (j.child.stdin.write(buf)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const stdin = j.child.stdin;
+    const finish = () => {
+      stdin.off('drain', finish);
+      stdin.off('close', exited);
+      resolve();
+    };
+    const exited = () => j.done.then(finish);
+    stdin.once('drain', finish);
+    stdin.once('close', exited);
+    j.done.then(finish);
+  });
+}
+
 async function apiFramesPush(ctx, req, res, url) {
   const j = framesJob(ctx, url);
+  // in flight from the moment it arrives: a big push can take a while to upload, and that isn't an abandoned page
+  j.pushing++;
+  try {
+    return await pushFrames(ctx, req, res, url, j);
+  } finally {
+    j.pushing--;
+    j.last = Date.now();
+  }
+}
+
+async function pushFrames(ctx, req, res, url, j) {
   const buf = await readBody(req, FRAMES_LIMIT);
   if (j.failed) throw httpError(500, j.failed);
+  if (j.ending || j.job.ended) throw httpError(409, 'This export is finishing: it takes no more frames');
   // ?from=i (raw frames): the index of the first frame in this push, so a push the page sends again after a failed
   // request doesn't add its frames twice. Frames the server already has are skipped; a gap is an error.
   const fromRaw = url.searchParams.get('from');
@@ -925,61 +994,63 @@ async function apiFramesPush(ctx, req, res, url) {
   const already = from == null ? 0 : j.got - from;
   // ?repeat=n: the last frame again n times (a still stretch costs no upload)
   const asked = Math.max(0, Math.round(num(url.searchParams.get('repeat'), 0)));
-  const repeat = Math.min(Math.max(0, asked - already), j.total - j.got);
+  // Frames count as received the moment they're accepted, before ffmpeg has taken them: a push sent again while
+  // this one waits on ffmpeg then sees them and skips them, and the next push queues behind them in order.
+  const writes = [];
   if (asked) {
     if (!j.frameBytes || !j.lastFrame) throw httpError(400, 'Nothing to repeat');
-    j.last = Date.now();
-    for (let i = 0; i < repeat; i++) if (!j.child.stdin.write(j.lastFrame)) await new Promise((r) => j.child.stdin.once('drain', r));
+    const repeat = Math.min(Math.max(0, asked - already), j.total - j.got);
     j.got += repeat;
+    for (let i = 0; i < repeat; i++) writes.push(j.lastFrame);
   } else {
     if (!buf.length) return sendJson(res, 200, { got: j.got });
     if (j.frameBytes) {
       if (buf.length % j.frameBytes) throw httpError(400, `Raw frames must be ${j.frameBytes} bytes each`);
     } else if (buf.readUInt32BE(0) !== 0x89504e47) throw httpError(400, 'Frames must be PNG');
-    j.last = Date.now();
     const fresh = already > 0 ? buf.subarray(Math.min(buf.length, already * j.frameBytes)) : buf;
     if (fresh.length) {
-      const ok = j.child.stdin.write(fresh);
-      if (!ok) await new Promise((r) => j.child.stdin.once('drain', r));
       if (j.frameBytes) {
         j.got += fresh.length / j.frameBytes;
         j.lastFrame = Buffer.from(fresh.subarray(fresh.length - j.frameBytes));
       } else j.got += countPngs(fresh);
+      writes.push(fresh);
     }
   }
-  ctx.jobs.export.set({ pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
+  for (const w of writes) {
+    if (j.failed) break;
+    await feed(j, w);
+  }
   if (j.failed) throw httpError(500, j.failed);
+  j.job.set({ pct: clamp((j.got / j.total) * 97, 0, 97), line: `Drawing frames (${Math.min(j.got, j.total)}/${j.total})…` });
   return sendJson(res, 200, { got: j.got });
 }
 
 async function apiFramesEnd(ctx, req, res, url) {
   const j = framesJob(ctx, url);
+  const { job } = j;
   await readBody(req, JSON_LIMIT);
   if (url.searchParams.get('cancel')) {
     j.failed = 'Cancelled';
-    j.child.kill('SIGKILL');
+    job.cancel(); // stops ffmpeg (and a mux in progress) and removes the half-made files
     await j.done;
-    fs.rmSync(j.out, { force: true });
-    fs.rmSync(j.picture, { force: true });
-    ctx.frames = null;
-    ctx.jobs.export.reset();
     return sendJson(res, 200, ctx.jobs.export.status);
   }
-  ctx.jobs.export.set({ line: 'Encoding…', pct: 98 });
+  if (j.ending) throw httpError(409, 'This export is already finishing');
+  j.ending = true;
+  job.set({ line: 'Encoding…', pct: 98 });
   j.child.stdin.end();
   await j.done;
   if (!j.failed && j.picture !== j.out) {
-    ctx.jobs.export.set({ line: 'Adding sound…', pct: 99 });
+    job.set({ line: 'Adding sound…', pct: 99 });
     const ff = ffmpegFor(ctx);
-    const r = await run(ff.path, buildMuxArgs({ video: j.picture, out: j.out, format: j.format, duration: j.duration, audio: j.audio }), { env: ffmpegEnv(ff) });
-    if (r.code !== 0) j.failed = lastLine(r.stderr) || `ffmpeg exited with code ${r.code}`;
+    try {
+      await runTracked(job, ff.path, buildMuxArgs({ video: j.picture, out: j.out, format: j.format, duration: j.duration, audio: j.audio }), { env: ffmpegEnv(ff) });
+    } catch (err) {
+      j.failed ||= err.message;
+    }
   }
-  if (j.picture !== j.out) fs.rmSync(j.picture, { force: true });
-  ctx.frames = null;
-  if (j.failed) {
-    fs.rmSync(j.out, { force: true });
-    ctx.jobs.export.set({ state: 'error', line: j.failed, out: null, rel: null });
-  } else {
+  if (j.failed) failExport(job, j.failed);
+  else {
     if (j.setSrc) {
       try {
         await ctx.store.writeText(RENDER_FILE, JSON.stringify({ version: j.version, src: j.rel }));
@@ -988,9 +1059,10 @@ async function apiFramesEnd(ctx, req, res, url) {
       }
     }
     const side = j.captions ? await writeCaptionFiles(ctx, j.rel).catch(() => []) : [];
-    ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${j.rel}${side.length ? ` and its captions (${side.join(', ')})` : ''}` });
+    job.done({ pct: 100, line: `Saved ${j.rel}${side.length ? ` and its captions (${side.join(', ')})` : ''}` });
   }
-  return sendJson(res, 200, ctx.jobs.export.status);
+  // this job's own status: a newer job may be the lane's status by now
+  return sendJson(res, 200, job.status);
 }
 
 /** A timeline's captions next to an export (rel): name.srt and name.vtt. Returns the extensions written. */
@@ -1006,10 +1078,14 @@ async function writeCaptionFiles(ctx, rel) {
 
 // --- Export ------------------------------------------------------------------
 
-async function apiExport(ctx, req, res) {
-  if (ctx.jobs.export.running) throw httpError(409, 'An export is already running');
+function apiExport(ctx, req, res) {
+  return startJob(ctx.jobs.export, 'An export is already running', { line: 'Starting…' }, (job) => startExport(ctx, req, res, job));
+}
+
+async function startExport(ctx, req, res, job) {
   const body = (await readJson(req, EXPORT_LIMIT)) || {};
   const mode = ['render', 'edit'].includes(body.mode) ? body.mode : 'mix';
+  job.set({ mode });
   if (mode === 'render' && !ctx.projectCode) throw httpError(403, "This server runs in safe mode (--safe): the project's export command doesn't run");
   const reel = await loadReel(ctx);
 
@@ -1026,70 +1102,55 @@ async function apiExport(ctx, req, res) {
     musicOffset: num(body.musicOffset, 0),
     musicFade: Math.max(0, num(body.musicFade, 0)),
   };
+  if (mode === 'render' && (!reel.export || typeof reel.export.cmd !== 'string' || !reel.export.cmd.trim())) throw httpError(400, 'reel.json has no export.cmd');
 
   const rel = await ctx.store.freeName('exports', `${slug(reel.id)}-${stamp()}.mp4`);
   const out = ctx.store.path(rel);
-  ctx.jobs.export.begin({ line: 'Starting…', out, rel, mode });
+  job.set({ out, rel });
+  job.cleanup((ok) => ok || fs.rmSync(out, { force: true })); // a half-made export never stays behind
+  const finish = (work) => {
+    work.then(
+      () => job.done({ pct: 100, line: `Saved ${rel}` }),
+      (err) => failExport(job, err.message),
+    );
+    return sendJson(res, 200, job.status);
+  };
 
-  if (mode === 'render') {
-    if (!reel.export || typeof reel.export.cmd !== 'string' || !reel.export.cmd.trim()) {
-      ctx.jobs.export.reset();
-      throw httpError(400, 'reel.json has no export.cmd');
-    }
-    runRender(ctx, reel, body.props, levels, out).catch((err) => ctx.jobs.export.set({ state: 'error', line: err.message }));
-  } else if (mode === 'edit') {
-    const ff = ffmpegFor(ctx);
+  if (mode === 'render') return finish(runRender(ctx, job, reel, body.props, levels, out));
+  const ff = ffmpegFor(ctx);
+  const refuse = (line) => {
+    failExport(job, line);
+    return sendJson(res, 200, job.status);
+  };
+  if (mode === 'edit') {
     const encoder = await editEncoder(ctx, ff);
     const video = await ctx.store.file(String(reel.src || ''));
-    const fail = (line) => {
-      ctx.jobs.export.set({ state: 'error', line, out: null, rel: null });
-      return sendJson(res, 200, ctx.jobs.export.status);
-    };
-    if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
-    if (!encoder) return fail("This ffmpeg can't apply edits (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
-    if (!video) return fail(`Video not found: ${reel.src}`);
-    runEdit(ctx, ff, encoder, video, reel, body.edit, levels, out)
-      .then(() => ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${rel}` }))
-      .catch((err) => {
-        fs.rmSync(out, { force: true });
-        ctx.jobs.export.set({ state: 'error', line: err.message, out: null, rel: null });
-      });
-  } else {
-    const ff = ffmpegFor(ctx);
-    if (!ff) {
-      ctx.jobs.export.set({ state: 'error', line: 'ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.', out: null, rel: null });
-      return sendJson(res, 200, ctx.jobs.export.status);
-    }
-    const video = await ctx.store.file(String(reel.src || ''));
-    if (!video) {
-      ctx.jobs.export.set({ state: 'error', line: `Video not found: ${reel.src}`, out: null, rel: null });
-      return sendJson(res, 200, ctx.jobs.export.status);
-    }
-    runMix(ctx, ff, video, levels, out, reel.duration)
-      .then(() => ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${rel}` }))
-      .catch((err) => {
-        fs.rmSync(out, { force: true });
-        ctx.jobs.export.set({ state: 'error', line: err.message, out: null, rel: null });
-      });
+    if (!ff) return refuse(FFMPEG_MISSING);
+    if (!encoder) return refuse("This ffmpeg can't apply edits (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
+    if (!video) return refuse(`Video not found: ${reel.src}`);
+    return finish(runEdit(ctx, job, ff, encoder, video, reel, body.edit, levels, out));
   }
-  return sendJson(res, 200, ctx.jobs.export.status);
+  if (!ff) return refuse(FFMPEG_MISSING);
+  const video = await ctx.store.file(String(reel.src || ''));
+  if (!video) return refuse(`Video not found: ${reel.src}`);
+  return finish(runMix(ctx, job, ff, video, levels, out, reel.duration));
 }
 
 /** Copy the video and mix in the music with ffmpeg. Updates the export's pct as it goes. */
-async function runMix(ctx, ff, video, levels, out, reelDuration) {
+async function runMix(ctx, job, ff, video, levels, out, reelDuration) {
   const info = await probe(ff, video);
   const duration = info.duration || num(reelDuration, 0);
   if (!(duration > 0)) throw new Error('Could not read the video duration');
   const args = buildMixArgs({ video, out, duration, hasVideoAudio: info.hasAudio, ...levels });
-  ctx.jobs.export.set({ line: 'Mixing audio…' });
-  await runTracked(ctx.jobs.export, ff.path, args, { env: ffmpegEnv(ff), seconds: duration });
+  job.set({ line: 'Mixing audio…' });
+  await runTracked(job, ff.path, args, { env: ffmpegEnv(ff), seconds: duration });
 }
 
 /**
  * Export an edited plain video: trim, cuts, colour, blur boxes, and text/logo layers the player drew as
  * full-frame PNGs (data URLs in edit.layers[].png). Updates the export's pct over the edited length.
  */
-async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
+async function runEdit(ctx, job, ff, encoder, video, reel, edit, levels, out) {
   const info = await probe(ff, video);
   const D = info.duration || num(reel.duration, 0);
   const W = info.w;
@@ -1099,6 +1160,7 @@ async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
   const keep = keepRanges(D, e.trim, e.cuts);
   if (!keep.length) throw new Error('Nothing left to export: the cuts cover the whole video');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'motionsnip-edit-'));
+  job.cleanup(() => fs.rmSync(tmp, { recursive: true, force: true })); // also when the player closes mid-export
   try {
     const layers = [];
     const span = (t) => {
@@ -1128,8 +1190,8 @@ async function runEdit(ctx, ff, encoder, video, reel, edit, levels, out) {
     }
     const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
     const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W, H, fps: info.fps || reel.fps, D, keep, look: e.look, layers, encoder, out, ...levels });
-    ctx.jobs.export.set({ line: 'Applying your edits…' });
-    await runTracked(ctx.jobs.export, ff.path, args, { env: ffmpegEnv(ff), seconds: OD });
+    job.set({ line: 'Applying your edits…' });
+    await runTracked(job, ff.path, args, { env: ffmpegEnv(ff), seconds: OD });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1154,10 +1216,14 @@ async function levelsFrom(ctx, body) {
 }
 
 /** Make (or make again) a cutdown: POST { id: preset or output id, keys?, mode?, zoom?, ranges?, music, levels }. */
-async function apiCutdown(ctx, req, res) {
-  if (ctx.jobs.cutdown.running) throw httpError(409, 'A cutdown is already being made');
+function apiCutdown(ctx, req, res) {
+  return startJob(ctx.jobs.cutdown, 'A cutdown is already being made', { line: 'Starting…' }, (job) => startCutdown(ctx, req, res, job));
+}
+
+async function startCutdown(ctx, req, res, job) {
   const body = (await readJson(req)) || {};
   if (typeof body.id !== 'string' || !body.id) throw httpError(400, 'Which cutdown? (id)');
+  job.set({ id: body.id });
   const reel = await readReel(ctx);
   const mine = await readPlayerOutputs(ctx.store);
   if ((Array.isArray(reel.outputs) ? reel.outputs : []).some((o) => o && String(o.id) === body.id)) {
@@ -1165,11 +1231,11 @@ async function apiCutdown(ctx, req, res) {
   }
   const levels = await levelsFrom(ctx, body);
   const fail = (line) => {
-    ctx.jobs.cutdown.reset({ state: 'error', line, id: body.id });
-    return sendJson(res, 200, ctx.jobs.cutdown.status);
+    job.fail(line, { pct: 0 });
+    return sendJson(res, 200, job.status);
   };
   const ff = ffmpegFor(ctx);
-  if (!ff) return fail('ffmpeg not found. Install it (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.');
+  if (!ff) return fail(FFMPEG_MISSING);
   const encoder = await cutEncoder(ctx, ff);
   if (!encoder) return fail("This ffmpeg can't make cutdowns (it has no video filters). Install the full one (brew install ffmpeg) or start the server with --ffmpeg /path/to/ffmpeg.");
   const video = await ctx.store.file(String(reel.src || ''));
@@ -1184,11 +1250,12 @@ async function apiCutdown(ctx, req, res) {
   } catch (err) {
     return fail(err.message);
   }
-  ctx.jobs.cutdown.begin({ line: `Making the ${entry.label} version…`, id: entry.id, label: entry.label });
-  runCutdown(ctx, ff, encoder, video, info, reel, entry, levels)
-    .then(() => ctx.jobs.cutdown.set({ state: 'done', pct: 100, line: `Saved ${entry.src}` }))
-    .catch((err) => ctx.jobs.cutdown.set({ state: 'error', line: err.message }));
-  return sendJson(res, 200, ctx.jobs.cutdown.status);
+  job.set({ line: `Making the ${entry.label} version…`, id: entry.id, label: entry.label });
+  runCutdown(ctx, job, ff, encoder, video, info, reel, entry, levels).then(
+    () => job.done({ pct: 100, line: `Saved ${entry.src}` }),
+    (err) => job.fail(err.message),
+  );
+  return sendJson(res, 200, job.status);
 }
 
 /** The encoder for cutdowns: an edit encoder, if this ffmpeg also has setsar. */
@@ -1203,7 +1270,7 @@ async function cutEncoder(ctx, ff) {
   return ctx.cutOk.ok ? encoder : null;
 }
 
-async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
+async function runCutdown(ctx, job, ff, encoder, video, info, reel, entry, levels) {
   const D = info.duration;
   const keep = entry.kind === 'bumper' ? entry.ranges : [[0, D]];
   const reframe = entry.kind === 'reframe' ? reframeSpec(info.w, info.h, entry) : null;
@@ -1212,8 +1279,9 @@ async function runCutdown(ctx, ff, encoder, video, info, reel, entry, levels) {
   fs.mkdirSync(path.dirname(final), { recursive: true });
   const OD = keep.reduce((s, [a, b]) => s + b - a, 0);
   const args = buildEditArgs({ video, hasVideoAudio: info.hasAudio, W: info.w, H: info.h, fps: info.fps || reel.fps, D, keep, reframe, encoder, out: tmp, ...levels });
+  job.cleanup(() => fs.rmSync(tmp, { force: true })); // also when the player closes mid-cutdown
   try {
-    await runTracked(ctx.jobs.cutdown, ff.path, args, { env: ffmpegEnv(ff), seconds: OD });
+    await runTracked(job, ff.path, args, { env: ffmpegEnv(ff), seconds: OD });
     fs.renameSync(tmp, final);
   } catch (err) {
     fs.rmSync(tmp, { force: true });
@@ -1246,8 +1314,9 @@ async function apiCutdownRemove(ctx, req, res) {
  * If the command writes $OUT we're done. If it only writes $RAW, we mix the music into it to make $OUT
  * (so a render can stay effects-only and the reviewer's music settings still apply).
  */
-async function runRender(ctx, reel, reqProps, levels, out) {
+async function runRender(ctx, job, reel, reqProps, levels, out) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'motionsnip-'));
+  job.cleanup(() => fs.rmSync(tmp, { recursive: true, force: true }));
   try {
     const props = { ...(reel.export.props || {}), ...(reqProps && typeof reqProps === 'object' ? reqProps : {}) };
     const propsFile = path.join(tmp, 'props.json');
@@ -1256,17 +1325,19 @@ async function runRender(ctx, reel, reqProps, levels, out) {
     // export.cmd runs on this computer, in the project folder (or export.cwd, which may be outside it)
     const cwd = reel.export.cwd ? path.resolve(ctx.store.root, String(reel.export.cwd)) : ctx.store.root;
     if (!fs.existsSync(cwd)) throw new Error(`export.cwd not found: ${cwd}`);
-    ctx.jobs.export.set({ line: 'Rendering…' });
+    job.set({ line: 'Rendering…' });
 
     const env = { ...process.env, PROPS: propsFile, OUT: out, RAW: raw, PROJECT: ctx.store.root };
-    await runTracked(ctx.jobs.export, 'sh', ['-c', reel.export.cmd], {
+    // its own process group: stopping the export stops whatever the command started, not just the shell
+    await runTracked(job, 'sh', ['-c', reel.export.cmd], {
       cwd,
       env,
       what: 'export command',
+      group: true,
       onOutput: (text) => {
         const pct = progressFromText(text);
         const line = lastLine(text);
-        ctx.jobs.export.set({ ...(pct !== null ? { pct: clamp(pct, 0, 99) } : {}), ...(line ? { line } : {}) });
+        job.set({ ...(pct !== null ? { pct: clamp(pct, 0, 99) } : {}), ...(line ? { line } : {}) });
       },
     });
 
@@ -1274,14 +1345,11 @@ async function runRender(ctx, reel, reqProps, levels, out) {
       if (!isFile(raw)) throw new Error('The export command finished but wrote neither $OUT nor $RAW');
       const ff = ffmpegFor(ctx);
       if (levels.music && ff) {
-        await runMix(ctx, ff, raw, levels, out, reel.duration);
+        await runMix(ctx, job, ff, raw, levels, out, reel.duration);
       } else {
         await fsp.copyFile(raw, out);
       }
     }
-    ctx.jobs.export.set({ state: 'done', pct: 100, line: `Saved ${ctx.store.rel(out)}` });
-  } catch (err) {
-    ctx.jobs.export.set({ state: 'error', line: err.message, out: null, rel: null });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1568,29 +1636,86 @@ async function selftest() {
     assert.throws(() => buildMixArgs({ ...common, duration: 0 }));
 
     // Plain videos: which file, and its version
-    // JobRunner (lib/jobs.mjs): one task at a time per lane, the status the player polls
+    // JobRunner (lib/jobs.mjs): one task at a time per lane, the status the player polls. A task is a job handle:
+    // only the current job changes the lane, and its clean-ups run once on every way it ends.
     {
       const jr = createJobRunner({ a: { state: 'idle', pct: 0, line: '', id: null } });
       assert.deepEqual(jr.a.status, { state: 'idle', pct: 0, line: '', id: null });
-      jr.a.begin({ line: 'Go', id: 'x' });
+      let job = jr.a.begin({ line: 'Go', id: 'x' });
       assert.ok(jr.a.running);
-      assert.deepEqual(jr.a.status, { state: 'running', pct: 0, line: 'Go', id: 'x' });
+      assert.match(job.id, /^[0-9a-f]{12}$/);
+      assert.deepEqual(jr.a.status, { state: 'running', pct: 0, line: 'Go', id: 'x', job: job.id });
+      assert.throws(() => jr.a.begin(), /busy/, 'one task at a time');
       const node = process.execPath;
-      await runTracked(jr.a, node, ['-e', "process.stdout.write('out_time_us=500000\\n')"], { seconds: 1 });
+      await runTracked(job, node, ['-e', "process.stdout.write('out_time_us=500000\\n')"], { seconds: 1 });
       assert.equal(jr.a.status.pct, 50, 'ffmpeg -progress output becomes pct');
-      await assert.rejects(runTracked(jr.a, node, ['-e', "console.error('first\\nit broke'); process.exit(3)"]), /it broke/, 'a failure says its last line');
-      await assert.rejects(runTracked(jr.a, node, ['-e', 'process.exit(2)'], { what: 'thing' }), /thing exited with code 2/);
+      await assert.rejects(runTracked(job, node, ['-e', "console.error('first\\nit broke'); process.exit(3)"]), /it broke/, 'a failure says its last line');
+      await assert.rejects(runTracked(job, node, ['-e', 'process.exit(2)'], { what: 'thing' }), /thing exited with code 2/);
       const seen = [];
-      await runTracked(jr.a, node, ['-e', "console.log('12%'); console.error('half')"], { onOutput: (t) => seen.push(t.trim()) });
+      await runTracked(job, node, ['-e', "console.log('12%'); console.error('half')"], { onOutput: (t) => seen.push(t.trim()) });
       assert.deepEqual(seen.sort(), ['12%', 'half']);
-      const slow = runTracked(jr.a, node, ['-e', 'setTimeout(() => {}, 30000)']);
+      const ends = [];
+      job.cleanup((ok) => ends.push(ok));
+      assert.equal(job.done({ pct: 100, line: 'Saved' }), true);
+      assert.equal(job.done(), false, 'a job ends once');
+      assert.deepEqual(ends, [true], 'clean-ups run once, told it worked');
+      assert.ok(!jr.a.running);
+      assert.equal(jr.a.status.state, 'done');
+      // a job that already ended can't touch the next job's status (a slow request finishing late)
+      const old = job;
+      job = jr.a.begin({ line: 'Second', id: 'y' });
+      old.set({ line: 'stale' });
+      assert.equal(old.fail('stale'), false);
+      assert.deepEqual([jr.a.status.state, jr.a.status.line, jr.a.status.job], ['running', 'Second', job.id], 'an old job leaves the new one alone');
+      job.fail('No', { id: null });
+      assert.deepEqual([jr.a.status.state, jr.a.status.line], ['error', 'No']);
+      // abort: a start that was refused puts the status back the way it was
+      job = jr.a.begin({ line: 'Third' });
+      job.abort();
+      assert.deepEqual([jr.a.status.state, jr.a.status.line], ['error', 'No'], 'abort restores the status before begin');
+      // cancel: back to idle; the job's processes are stopped and its clean-ups told it failed
+      job = jr.a.begin();
+      const cancelled = [];
+      job.cleanup((ok) => cancelled.push(ok));
+      const longOne = runTracked(job, node, ['-e', 'setTimeout(() => {}, 30000)']);
+      await new Promise((r) => setTimeout(r, 100));
+      job.cancel();
+      await assert.rejects(longOne, /exited|null/, 'cancel ends the job\'s process');
+      assert.deepEqual(cancelled, [false]);
+      assert.deepEqual(jr.a.status, { state: 'idle', pct: 0, line: '', id: null });
+      // a process attached after the job ended is stopped straight away
+      const late = runTracked(job, node, ['-e', 'setTimeout(() => {}, 30000)']);
+      await assert.rejects(late, /exited|null/, 'no process outlives its job');
+      // stopAll (the server closing): every running job is stopped and cleaned up
+      job = jr.a.begin();
+      const stopped = [];
+      job.cleanup((ok) => stopped.push(ok));
+      const slow = runTracked(job, node, ['-e', 'setTimeout(() => {}, 30000)']);
       await new Promise((r) => setTimeout(r, 100));
       jr.stopAll();
       await assert.rejects(slow, /exited|null/, 'stopAll ends a running task');
-      jr.a.set({ state: 'done', pct: 100 });
+      assert.deepEqual(stopped, [false]);
       assert.ok(!jr.a.running);
-      jr.a.reset({ state: 'error', line: 'No' });
-      assert.deepEqual(jr.a.status, { state: 'error', pct: 0, line: 'No', id: null });
+      // group: a shell's own child processes stop with it
+      if (process.platform !== 'win32') {
+        const pidFile = path.join(mkTmp(), 'pid');
+        job = jr.a.begin();
+        const sh = runTracked(job, 'sh', ['-c', `sleep 30 & echo $! > '${pidFile}'; wait`], { group: true });
+        for (let i = 0; i < 50 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 20));
+        const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+        job.cancel();
+        await assert.rejects(sh, /exited|null/);
+        let alive = true;
+        for (let i = 0; i < 50 && alive; i++) {
+          await new Promise((r) => setTimeout(r, 20));
+          try {
+            process.kill(pid, 0);
+          } catch {
+            alive = false;
+          }
+        }
+        assert.ok(!alive, "a grouped job's grandchild process is stopped too");
+      }
     }
     // ProjectStore (lib/store.mjs): the local folder store the routes go through
     {
@@ -2450,6 +2575,126 @@ async function selftest() {
         assert.equal((await probe(realFf, path.join(fd, r.json.rel))).matrix, 'bt709', 'exports are tagged BT.709');
       } finally {
         await fs2.close();
+      }
+    }
+
+    // Export jobs: a crashed or slow ffmpeg, two starts at once, a page that went away, a failed render
+    if (realFf && process.platform !== 'win32') {
+      const ed = mkTmp();
+      fs.writeFileSync(path.join(ed, 'scene.json'), JSON.stringify({ title: 'Jobs', version: 1, size: [64, 36], fps: 10, shots: [{ id: 'a', dur: 1 }] }));
+      // a stand-in ffmpeg: the real one for probes, but with frames on stdin it misbehaves the way $MODE says
+      const fake = path.join(ed, 'fake-ffmpeg');
+      fs.writeFileSync(
+        fake,
+        `#!/bin/sh
+case "$*" in *pipe:0*)
+  mode=$(cat '${path.join(ed, 'mode')}' 2>/dev/null)
+  if [ "$mode" = die ]; then head -c 50000 >/dev/null; echo 'fake encoder died' >&2; exit 1; fi
+  if [ "$mode" = slow ]; then sleep 1; fi
+  ;;
+esac
+exec '${realFf.path}' "$@"
+`,
+      );
+      fs.chmodSync(fake, 0o755);
+      const mode = (m) => fs.writeFileSync(path.join(ed, 'mode'), m);
+      const frame = (v) => Buffer.alloc(64 * 36 * 4, v);
+      const within = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what}: no answer in ${ms} ms`)), ms))]);
+      const exportsLeft = () => (fs.existsSync(path.join(ed, 'exports')) ? fs.readdirSync(path.join(ed, 'exports')) : []);
+      // each case gets its own server, so one case's leftovers can't make the next pass or fail
+      const withServer = async (m, fn) => {
+        mode(m);
+        const js = await startServer({ dir: ed, port: 0, open: false, quiet: true, ffmpeg: fake, framesIdleMs: 400 });
+        const post = { origin: `http://localhost:${js.port}` };
+        const t = {
+          start: (extra = {}) => request(js.port, 'POST', '/api/frames-start', { body: JSON.stringify({ format: 'mp4', fps: 10, w: 64, h: 36, frames: 40, pix: 'rgba', ...extra }), headers: post }),
+          push: (job, q, body) => request(js.port, 'POST', `/api/frames-push?job=${job}${q}`, { body, headers: post }),
+          end: (job, q = '') => request(js.port, 'POST', `/api/frames-end?job=${job}${q}`, { body: '{}', headers: post }),
+          status: () => request(js.port, 'GET', '/api/export'),
+        };
+        try {
+          await fn(t);
+        } finally {
+          await js.close();
+          fs.rmSync(path.join(ed, 'exports'), { recursive: true, force: true });
+        }
+      };
+
+      // 1. ffmpeg dies while a push waits for it to take more frames: the push answers with the error
+      await withServer('die', async (t) => {
+        let r = await t.start();
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        r = await within(t.push(r.json.job, '&from=0', Buffer.concat(Array.from({ length: 40 }, (_, i) => frame(i)))), 5000, 'push into a dead ffmpeg');
+        assert.equal(r.status, 500, 'a push into a dead ffmpeg fails');
+        assert.match(r.json.error, /fake encoder died/);
+        r = await t.status();
+        assert.equal(r.json.state, 'error', 'the export shows the failure without waiting for the page');
+        assert.match(r.json.line, /fake encoder died/);
+        assert.deepEqual(exportsLeft(), [], 'the half-made file is removed');
+      });
+
+      // 2. two starts at the same moment: one export, one refusal
+      await withServer('ok', async (t) => {
+        const both = await Promise.all([t.start(), t.start()]);
+        assert.deepEqual(both.map((x) => x.status).sort(), [200, 409], 'only one of two simultaneous starts runs');
+        const r = await t.end(both.find((x) => x.status === 200).json.job, '&cancel=1');
+        assert.equal(r.json.state, 'idle');
+        assert.deepEqual(exportsLeft(), [], 'nothing left behind');
+      });
+
+      // 3. a push sent again while the first is still waiting on ffmpeg adds nothing twice
+      await withServer('slow', async (t) => {
+        let r = await t.start({ frames: 20 });
+        const job = r.json.job;
+        const firstHalf = Buffer.concat(Array.from({ length: 10 }, (_, i) => frame(i * 10)));
+        const first = t.push(job, '&from=0', firstHalf);
+        await new Promise((res) => setTimeout(res, 150)); // the slow ffmpeg hasn't read yet: the first push is waiting
+        const again = await t.push(job, '&from=0', firstHalf);
+        assert.equal(again.json.got, 10, 'a retried push during the wait adds no frames');
+        assert.equal((await first).json.got, 10);
+        r = await t.push(job, '&from=10', Buffer.concat(Array.from({ length: 10 }, (_, i) => frame(100 + i * 10))));
+        assert.equal(r.json.got, 20, 'the next push lands after the first');
+        r = await t.end(job);
+        assert.equal(r.json.state, 'done', r.json.line);
+        const frames = await run(realFf.path, ['-hide_banner', '-nostdin', '-i', path.join(ed, r.json.rel), '-map', '0:v', '-f', 'null', '-'], { env: ffmpegEnv(realFf) });
+        assert.match(frames.stderr, /frame=\s*20\b/, 'exactly 20 frames, none twice');
+      });
+
+      // 4. the page stops sending frames: the export ends on its own, its files go, other exports can start
+      await withServer('ok', async (t) => {
+        let r = await t.start();
+        const job = r.json.job;
+        await t.push(job, '&from=0', frame(1));
+        await new Promise((res) => setTimeout(res, 1500));
+        r = await t.status();
+        assert.notEqual(r.json.state, 'running', 'an abandoned export stops blocking');
+        assert.deepEqual(exportsLeft(), [], 'its half-made files are removed');
+        r = await t.push(job, '&from=1', frame(2));
+        assert.equal(r.status, 404, 'an abandoned export takes no more frames');
+        r = await t.start();
+        assert.equal(r.status, 200, 'a new export starts after an abandoned one');
+        r = await t.end(r.json.job, '&cancel=1');
+        assert.equal(r.json.state, 'idle');
+      });
+
+      // 5. a render command that fails after writing part of $OUT: the partial export is removed
+      const rd = mkTmp();
+      fs.writeFileSync(path.join(rd, 'reel.json'), JSON.stringify({ id: 'rend', version: 1, duration: 1, export: { cmd: 'printf partial > "$OUT"; echo "render broke" >&2; exit 4' } }));
+      const rs = await startServer({ dir: rd, port: 0, open: false, quiet: true, ffmpeg: realFf.path });
+      try {
+        const post = { origin: `http://localhost:${rs.port}` };
+        let r = await request(rs.port, 'POST', '/api/export', { body: JSON.stringify({ mode: 'render' }), headers: post });
+        assert.equal(r.status, 200, JSON.stringify(r.json));
+        for (let i = 0; i < 100 && r.json.state === 'running'; i++) {
+          await new Promise((res) => setTimeout(res, 30));
+          r = await request(rs.port, 'GET', '/api/export');
+        }
+        assert.equal(r.json.state, 'error');
+        assert.match(r.json.line, /render broke/);
+        const left = fs.existsSync(path.join(rd, 'exports')) ? fs.readdirSync(path.join(rd, 'exports')) : [];
+        assert.deepEqual(left, [], 'a failed render leaves no partial export');
+      } finally {
+        await rs.close();
       }
     }
 
