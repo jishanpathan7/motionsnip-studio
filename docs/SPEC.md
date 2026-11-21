@@ -119,6 +119,12 @@ node player/server.mjs --selftest
     `startServer({ store })` takes another. Engines that need a real path (ffmpeg, `export.cmd`) ask `store.path()`.
   - **JobRunner** (`lib/jobs.mjs`): the export and the cutdown each run in a lane (one task at a time) that holds
     the status `GET /api/export` and `GET /api/cutdown` return; `runTracked` turns ffmpeg's `-progress` into `pct`.
+    A request starts its task with `lane.begin()` before its first await, so two requests can't both start one, and
+    gets a job handle: only the lane's current job changes the status (`status.job` is its id), so a slow request
+    finishing late can't touch the next job. A job ends once (done, fail, cancel, or abort for a refused request,
+    which puts the status back), and every way it ends stops its processes and runs its clean-ups (temp files, a
+    half-made export), also when the server closes. An `export.cmd` runs as its own process group, so stopping it
+    stops what it started.
 - `--safe` (`startServer({ projectCode: false })`): code from the project folder never runs.
   - `GET /api/reel` leaves out `export.cmd`/`export.cwd` and a script `live`, and lists what it left out in
     `codeOff: ['export.cmd', 'live']`. The player says so once.
@@ -149,7 +155,10 @@ node player/server.mjs --selftest
   `?repeat=n` sends the last frame again n times. With raw frames, `?from=i` gives the index of the push's first frame:
   frames the server already has are skipped and a gap is a 400, so the player can send a push again when a request
   fails without an answer (it then sends plain bytes instead of a Blob, for browsers that run out of blob memory). `POST /api/frames-end?job=` (`&cancel=1` to stop). One job at a
-  time, abandoned after 20 s without frames. ffmpeg encodes the picture first, then mixes the audio clips under it in a
+  time. A frame export whose page stops sending frames for 20 s ends on its own and its files are removed; if ffmpeg
+  exits early, the push waiting on it answers with ffmpeg's error and the export's status becomes `error` straight
+  away. Frames count as received when a push is accepted, so a push sent again while the first still waits on
+  ffmpeg adds nothing twice. ffmpeg encodes the picture first, then mixes the audio clips under it in a
   second pass with the picture copied (clips with no sound track are skipped).
   `setSrc` makes the export the project's video; `captions` writes `<export>.srt` and `.vtt` from the timeline's captions.
   The picture is converted with the BT.709 matrix and tagged BT.709, the way browsers play untagged video.
@@ -174,7 +183,8 @@ node player/server.mjs --selftest
   is that file; other videos in the folder stay plain.
 - `POST /api/feedback` `{ version, markdown }` → writes `.motionsnip/feedback-v<version>.md`, responds `{ path }` (absolute).
 - `POST /api/export` `{ music, musicVol, sfxVol, musicOffset, musicFade, mode: "mix" | "render", props }` → starts one job
-  at a time; `GET /api/export` → `{ state: idle|running|done|error, pct, line, out }`.
+  at a time; `GET /api/export` → `{ state: idle|running|done|error, pct, line, out, job }`. A failed export leaves
+  no partial file.
   - `mode: "mix"`: ffmpeg copies the video stream and mixes audio: the video's own audio at `sfxVol` (if it has audio) plus
     `music` (a project path) at `musicVol`, delayed by `musicOffset` (or trimmed if negative), faded out over the last
     `musicFade` seconds, cut to the video duration; AAC 192k. Output `exports/<id>-<YYYYMMDD-HHMMSS>.mp4`, never overwritten.
