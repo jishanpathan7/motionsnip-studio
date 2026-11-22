@@ -838,8 +838,10 @@ function renderChanges() {
       h(
         'div.waiting',
         h('div.waiting-head', h('span.sweep', { 'aria-hidden': 'true' }), h('b', `Waiting for v${pending.version + 1}`)),
-        h('p.small', 'Paste this into Claude. The player reloads by itself when the new version is in.'),
-        promptBox(pending.line),
+        pending.delivered
+          ? h('p.small', 'Claude has it and is working on it. The player reloads by itself when the new version is in.')
+          : h('p.small', 'Paste this into Claude. The player reloads by itself when the new version is in.'),
+        pending.delivered ? null : promptBox(pending.line),
         h('div.mono.small.muted.path', { title: pending.path }, pending.path),
       ),
     );

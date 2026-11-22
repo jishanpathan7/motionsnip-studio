@@ -7,6 +7,7 @@
 //   node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]
 //                          [--addons <dir>]… [--no-addons] [--safe]
 //   node player/server.mjs --activate <key> | --install-pro | --deactivate | --licence   (MotionSnip Pro)
+//   node player/server.mjs --next-feedback --port 4321   (waits for the next Send to Claude, prints the prompt)
 //   node player/server.mjs --selftest
 //
 // A folder with a reel.json is a Claude-built project. A folder without one (or a
@@ -37,6 +38,7 @@ import { JSON_LIMIT, extOf, mimeFor, parseRange, hostAllowed, originAllowed, rea
 import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, cleanName, numberedName, sniffAudio, sniffImage, sniffVideo, resolveInside, parseReel, slug, stamp, isFile, isExecutable } from './lib/files.mjs';
 import { localStore, META } from './lib/store.mjs';
 import { createJobRunner, runTracked } from './lib/jobs.mjs';
+import { createHandoff, nextFeedback, promptLine, LISTEN_HEADER } from './lib/handoff.mjs';
 import { EDIT_FILTERS, parseProbe, progressFromText, buildMixArgs, within, keepRanges, normLook, lookMatrix, lookFilter, buildEditArgs, pickEditEncoder, run, findFfmpeg, ffmpegEnv, probe, lastLine } from './lib/media.mjs';
 // moved to lib/ and still exported from here, for the selftest and anything that imported them
 export { EDIT_FILTERS, buildEditArgs, buildMixArgs, cleanName, extOf, findFfmpeg, hostAllowed, keepRanges, lookFilter, lookMatrix, mimeFor, normLook, numberedName, originAllowed, parseProbe, parseRange, parseReel, pickEditEncoder, progressFromText, resolveInside, slug, sniffAudio, sniffImage, sniffVideo, stamp };
@@ -335,6 +337,8 @@ export async function startServer(opts) {
     }),
     takesBusy: new Set(),
     addons: new Map(),
+    // Claude's open listen requests: Send to Claude answers them with the prompt (lib/handoff.mjs)
+    handoff: createHandoff(opts.listenHoldMs ? { holdMs: opts.listenHoldMs } : {}),
     // false (--safe): code from the project folder never runs: no export.cmd, no live.js
     projectCode: opts.projectCode !== false,
   };
@@ -501,6 +505,12 @@ async function api(ctx, req, res, route, url) {
       return apiUpload(ctx, req, res, url);
     case 'POST feedback':
       return apiFeedback(ctx, req, res);
+    case 'GET feedback-next':
+      if (req.method === 'HEAD') return sendError(res, 405, 'Method not allowed');
+      if (!req.headers[LISTEN_HEADER]) return sendError(res, 403, `Listeners send ${LISTEN_HEADER}`);
+      return ctx.handoff.wait(res);
+    case 'GET feedback-listeners':
+      return sendJson(res, 200, { listening: ctx.handoff.size });
     case 'GET export':
       return sendJson(res, 200, ctx.jobs.export.status);
     case 'POST export':
@@ -707,7 +717,10 @@ async function apiFeedback(ctx, req, res) {
   if (typeof body.markdown !== 'string' || !body.markdown.trim()) throw httpError(400, 'markdown is required');
   const rel = `${META}/feedback-v${version}.md`;
   await ctx.store.writeText(rel, body.markdown.endsWith('\n') ? body.markdown : body.markdown + '\n');
-  return sendJson(res, 200, { path: ctx.store.path(rel) });
+  const file = ctx.store.path(rel);
+  // straight to Claude when it is listening; the player copies the prompt only when nobody got it
+  const delivered = ctx.handoff.deliver({ path: file, line: promptLine(file), version });
+  return sendJson(res, 200, { path: file, delivered });
 }
 
 async function apiReveal(ctx, req, res) {
@@ -1763,6 +1776,64 @@ async function selftest() {
       assert.equal(r.status, 200);
       assert.equal(r.json.path, path.join(dir, '.motionsnip', 'feedback-v1.md'));
       assert.equal(fs.readFileSync(r.json.path, 'utf8'), '# hi\n');
+      assert.equal(r.json.delivered, 0, 'nobody listening: the player copies the prompt instead');
+
+      // Send to Claude straight into the chat: Claude's open listen request gets the prompt
+      const until = async (cond, what) => {
+        for (let i = 0; i < 200 && !cond(); i++) await new Promise((ok) => setTimeout(ok, 10));
+        assert.ok(cond(), what);
+      };
+      const listen = { 'x-motionsnip-listener': '1' };
+      r = await req('GET', '/api/feedback-next');
+      assert.equal(r.status, 403, 'a listener must send the header (other sites cannot add it)');
+      r = await req('GET', '/api/feedback-next', { headers: { ...listen, host: `evil.example:${port}` } });
+      assert.equal(r.status, 403, 'and must be addressed to this server');
+      r = await req('GET', '/api/feedback-listeners');
+      assert.deepEqual(r.json, { listening: 0 });
+      const heard = [req('GET', '/api/feedback-next', { headers: listen }), req('GET', '/api/feedback-next', { headers: listen })];
+      await until(() => srv.ctx.handoff.size === 2, 'two listeners waiting');
+      r = await req('GET', '/api/feedback-listeners');
+      assert.deepEqual(r.json, { listening: 2 });
+      r = await req('POST', '/api/feedback', { body: JSON.stringify({ version: 2, markdown: '# v2' }), headers: post });
+      assert.equal(r.status, 200);
+      assert.equal(r.json.delivered, 2);
+      const fb2 = path.join(dir, '.motionsnip', 'feedback-v2.md');
+      for (const h of await Promise.all(heard)) {
+        assert.equal(h.status, 200);
+        assert.deepEqual(h.json, { path: fb2, line: `Apply the MotionSnip Studio feedback in ${fb2}`, version: 2 });
+      }
+      assert.equal(srv.ctx.handoff.size, 0, 'each listener hears one send');
+      r = await req('POST', '/api/feedback', { body: JSON.stringify({ version: 2, markdown: '# v2 again' }), headers: post });
+      assert.equal(r.json.delivered, 0, 'until it listens again');
+      // a listener that hangs up is forgotten
+      await new Promise((resolve) => {
+        const hung = http.request({ host: '127.0.0.1', port, path: '/api/feedback-next', headers: { host: `localhost:${port}`, ...listen } });
+        hung.on('error', () => {});
+        hung.end();
+        until(() => srv.ctx.handoff.size === 1, 'hung-up listener waiting').then(() => {
+          hung.destroy();
+          resolve();
+        });
+      });
+      await until(() => srv.ctx.handoff.size === 0, 'a hung-up listener is dropped');
+      // an open request is answered 204 after the hold time, and the listener asks again
+      srv.ctx.handoff.holdMs = 40;
+      r = await req('GET', '/api/feedback-next', { headers: listen });
+      assert.equal(r.status, 204);
+      assert.equal(srv.ctx.handoff.size, 0);
+      // the --next-feedback client rides over those 204s and returns the prompt
+      const next = nextFeedback({ port, retryMs: 10 });
+      await new Promise((ok) => setTimeout(ok, 120));
+      await until(() => srv.ctx.handoff.size === 1, 'client listening again after 204s');
+      r = await req('POST', '/api/feedback', { body: JSON.stringify({ version: 3, markdown: '# v3' }), headers: post });
+      assert.equal(r.json.delivered, 1);
+      assert.equal((await next).line, `Apply the MotionSnip Studio feedback in ${path.join(dir, '.motionsnip', 'feedback-v3.md')}`);
+      srv.ctx.handoff.holdMs = 240_000;
+      // and gives up when the player is gone
+      const dead = http.createServer();
+      const deadPort = await new Promise((ok) => dead.listen(0, '127.0.0.1', () => ok(dead.address().port)));
+      await new Promise((ok) => dead.close(ok));
+      await assert.rejects(nextFeedback({ port: deadPort, retryMs: 10, giveUpMs: 80 }), /isn't running/);
 
       // Takes: a copy per version, newest first
       r = await req('GET', '/api/takes');
@@ -2834,7 +2905,7 @@ async function selftest() {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null, safe: false, activate: null, installPro: false, deactivate: false, licence: false };
+  const opts = { dir: null, port: DEFAULT_PORT, open: true, ffmpeg: null, selftest: false, addons: null, safe: false, activate: null, installPro: false, deactivate: false, licence: false, nextFeedback: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -2843,6 +2914,7 @@ function parseArgs(argv) {
       return argv[++i];
     };
     if (a === '--selftest') opts.selftest = true;
+    else if (a === '--next-feedback') opts.nextFeedback = true;
     else if (a === '--no-open') opts.open = false;
     else if (a === '--port' || a.startsWith('--port=')) opts.port = Number(value());
     else if (a === '--ffmpeg' || a.startsWith('--ffmpeg=')) opts.ffmpeg = value();
@@ -2871,11 +2943,22 @@ async function main() {
   }
   if (opts.help) {
     console.log(
-      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons] [--safe]\n       node player/server.mjs --activate <key> | --install-pro | --deactivate | --licence\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).\n--safe: never run code from the project folder (reel.json export.cmd, a live.js renderer).',
+      'Usage: node player/server.mjs <project-dir | video-file> [--port 4321] [--no-open] [--ffmpeg /path/to/ffmpeg]\n                              [--addons <dir>]… [--no-addons] [--safe]\n       node player/server.mjs --activate <key> | --install-pro | --deactivate | --licence\n       node player/server.mjs --next-feedback --port 4321   (waits for Send to Claude, prints the prompt)\n       node player/server.mjs --selftest\n\nAdd-ons load from ~/.motionsnip/addons (or MOTIONSNIP_ADDONS, or each --addons dir).\n--safe: never run code from the project folder (reel.json export.cmd, a live.js renderer).',
     );
     return;
   }
   if (opts.selftest) process.exit(await selftest());
+  if (opts.nextFeedback) {
+    // Claude runs this in the background while the user reviews: it prints the prompt when they click Send
+    try {
+      const got = await nextFeedback({ port: opts.port });
+      console.log(got.line);
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
   if (opts.activate || opts.installPro || opts.deactivate || opts.licence) process.exit(await licenceCli(opts));
 
   let dir = path.resolve(opts.dir || '.');

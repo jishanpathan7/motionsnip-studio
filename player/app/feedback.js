@@ -320,7 +320,7 @@ export async function applySceneNow() {
   }
 }
 
-/** Send to Claude: write the feedback file, copy the prompt, mark changes as sent. */
+/** Send to Claude: write the feedback file, hand it to Claude (or copy the prompt), mark changes as sent. */
 export async function send() {
   const reel = store.master;
   const list = unsentChanges();
@@ -338,17 +338,19 @@ export async function send() {
     return null;
   }
   const line = promptLine(res.path);
-  const copied = await copyText(line);
+  // Claude was listening (it keeps `server.mjs --next-feedback` running): it already has the prompt
+  const delivered = res.delivered > 0;
+  const copied = delivered ? false : await copyText(line);
   for (const c of store.data.changes) c.sent = reel.version;
-  store.data.pending = { version: reel.version, sentAt: Date.now(), path: res.path, line, count: store.data.changes.length };
+  store.data.pending = { version: reel.version, sentAt: Date.now(), path: res.path, line, count: store.data.changes.length, delivered };
   store.data.notQuite = [];
   store.data.check = null;
   persist();
   flushPersist();
   bus.emit('changes', { sent: true });
   bus.emit('pending', { pending: store.data.pending });
-  toast(copied ? 'Prompt copied. Paste it into Claude.' : 'Saved. Copy the prompt from Changes and paste it into Claude.');
-  return { line, copied, path: res.path, markdown };
+  toast(delivered ? 'Sent to Claude. It\'s working on it.' : copied ? 'Prompt copied. Paste it into Claude.' : 'Saved. Copy the prompt from Changes and paste it into Claude.');
+  return { line, copied, delivered, path: res.path, markdown };
 }
 
 // ---------------------------------------------------------------- Check vN

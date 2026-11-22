@@ -21,8 +21,8 @@
 3. Claude checks its own render first and marks anything it isn't sure about. Then it opens the player. You watch it on your own machine.
 4. You fix words in place, swap the music, set levels, move things, and circle problems on the frame.
 5. You mark each scene **Approved** or **Needs changes**. Claude leaves approved scenes alone.
-6. You click **Send to Claude**. The player writes your changes to a file and copies one line to your clipboard.
-7. You paste that line to Claude. Claude applies the changes, re-renders and bumps the version.
+6. You click **Send to Claude**. The player writes your changes to a file and hands them straight to Claude in the chat you're working in.
+7. Claude applies the changes, re-renders and bumps the version. (If Claude isn't listening, say in a tool that can't run background commands, the player copies one line for you to paste instead.)
 8. The player reloads by itself and helps you check each change. Repeat until every scene is approved.
 9. You click **Export** to get the final mp4, with the music you picked mixed in.
 
@@ -65,7 +65,7 @@ Ask Claude for a video:
 
 > Make a 30 second launch video for Acme. Upbeat, our brand colours, a few big headlines.
 
-Claude builds it and opens the player. When you're done reviewing, click **Send to Claude** and paste the line it copies:
+Claude builds it and opens the player. When you're done reviewing, click **Send to Claude**. Claude listens to the player while you review, so your changes land in the same chat and it starts on them right away. If it isn't listening, the player copies this line for you to paste instead:
 
 > Apply the MotionSnip Studio feedback in /path/to/project/.motionsnip/feedback-v1.md
 

@@ -9,9 +9,9 @@ You build the video. The user reviews it in a local player. The loop is:
 
 1. Build and render the video.
 2. Describe it in `reel.json`.
-3. Open the player.
-4. The user reviews and clicks **Send to Claude**. You get one line: `Apply the MotionSnip Studio feedback in <abs path>`.
-5. Apply the feedback, re-render, bump `version`. The player reloads by itself and helps the user check your changes.
+3. Open the player, and listen for Send to Claude in the background (section 5).
+4. The user reviews and clicks **Send to Claude**. The line `Apply the MotionSnip Studio feedback in <abs path>` reaches you in the same chat by itself; nobody copies or pastes anything.
+5. Apply the feedback, re-render, bump `version`, and listen again. The player reloads by itself and helps the user check your changes.
 
 In this file, `<skill dir>` means the folder that holds this `SKILL.md`, usually `~/.claude/skills/motionsnip-studio`.
 
@@ -141,13 +141,21 @@ node <skill dir>/player/server.mjs <project> &
 
 Options: `--port 4321` (moves up if busy), `--no-open` (don't open a browser), `--ffmpeg /path/to/ffmpeg` (for Export). Node 18 or newer, no install step. If a server for this project is already running, don't start another; the player picks up new versions by itself.
 
-Tell the user what to do in one or two lines: watch it, click anything to fix it, right-click to circle a problem, then **Send to Claude**.
+**Listen for Send to Claude.** Right after the player is up, run this as a background command (in Claude Code: Bash with `run_in_background`), with the port the server printed:
+
+```bash
+node <skill dir>/player/server.mjs --next-feedback --port 4321
+```
+
+It waits, with no time limit, until the user clicks Send to Claude, then prints `Apply the MotionSnip Studio feedback in <abs path>` and exits. Its exit brings you back into the chat: apply that file as in section 6 without waiting for the user to say anything. The player sees that you are listening, so it tells the user "Sent to Claude" instead of copying the prompt. Start a new listener each time one exits, and keep only one running per project. If it exits with an error, the player was closed: stop listening. If your environment can't run background commands, skip this; the player then copies the prompt for the user to paste, as before.
+
+Tell the user what to do in one or two lines: watch it, click anything to fix it, right-click to circle a problem, then **Send to Claude**. Say that Send comes straight to you.
 
 **A plain video.** If the user wants to review or edit a video file that has no `reel.json` (a screen recording, a phone clip), pass the file itself: `node <skill dir>/player/server.mjs path/to/clip.mp4 &`. Don't write a `reel.json` for it. The player lets them trim, cut, add text, a logo or a blur, and set the colour, and its Export applies those edits itself. Their feedback file then only carries notes pinned on the frame; follow those, and if a note asks for a new cut, export over the same file name so the player counts it as the next version.
 
 ## 6. Apply a feedback file
 
-The user pastes `Apply the MotionSnip Studio feedback in <project>/.motionsnip/feedback-vN.md`. Read that file. It has these parts:
+The line `Apply the MotionSnip Studio feedback in <project>/.motionsnip/feedback-vN.md` arrives from your listener (or the user pastes it). Read that file. It has these parts:
 
 - **Exact changes.** Lines like `[00:01.2 · S1 · Headline] Text (src/Hook.tsx:12): "Meet Acme" -> "Say hi to Acme"`. Make exactly that change in the code and in `reel.json`. Don't reword it. A colour edit to `brand.<id>` changes the palette entry, so everything linked to it changes.
 - **Size and position edits.** `[x, y, w, h] -> [x, y, w, h] (scale 1.12)` in % of the frame. Convert to pixels with the frame size (`x% * w / 100`), move or resize the element in code, and update its `box`.
