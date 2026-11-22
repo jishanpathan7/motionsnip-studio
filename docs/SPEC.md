@@ -259,8 +259,13 @@ Responsive: panel moves under the frame below ~1100 px wide.
 - Undo per change; edits persist to browser storage and `POST /api/state` (debounced); on load, server state wins if newer.
 
 ### Sending and checking
-- Send to Claude opens Changes; "Send" builds the markdown (section 5), `POST /api/feedback`, copies one line to the
-  clipboard: `Apply the MotionSnip Studio feedback in <abs path>`, and shows "Waiting for v<N+1>" (the favicon sweeps).
+- Send to Claude opens Changes; "Send" builds the markdown (section 5), `POST /api/feedback`, and shows "Waiting for
+  v<N+1>" (the favicon sweeps). The server answers every open `GET /api/feedback-next` (Claude's background
+  `server.mjs --next-feedback`, which must send `x-motionsnip-listener`) with `{ path, line, version }`, where line is
+  `Apply the MotionSnip Studio feedback in <abs path>`, and returns `delivered` (how many got it). Delivered: the toast
+  says "Sent to Claude" and nothing is copied. Nobody listening: the line is copied to the clipboard and shown with a
+  Copy button. An open listen request is answered 204 after 4 minutes and the listener asks again.
+  `GET /api/feedback-listeners` returns `{ listening }`.
 - When a new version arrives: the cue dot flashes twice in the frame's top-right corner, the video reloads at the same
   time, the version number rolls over, and Changes opens on **Check v<N>**: edits whose new reel.json values match what
   was asked are ticked automatically; for the rest, "Show me" jumps there, then "Looks right" / "Not quite" (+ optional
